@@ -1,0 +1,9 @@
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.2
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    environment:
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+      CLICKHOUSE_PASSWORD: ""
