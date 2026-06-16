@@ -1,0 +1,99 @@
+NOTICE
+======
+
+ao-llm-worker
+Copyright 2026 Monte Carlo AI, Inc.
+
+This product includes software developed at Monte Carlo AI, Inc.
+(https://montecarlo.ai).
+
+
+--------------------------------------------------------------------------------
+Third-party components
+--------------------------------------------------------------------------------
+
+The ao-llm-worker container image bundles the following third-party Python
+packages. Each is installed unmodified into the application virtual environment
+(/app/.venv) of the distributed image. A verbatim copy of each component's
+license is provided under the LICENSES/ directory distributed alongside this
+NOTICE (LICENSES/<project>/LICENSE, mounted at /app/LICENSES in the image).
+Where an upstream project ships its own NOTICE file, that file is reproduced
+verbatim at LICENSES/<project>/NOTICE and its attribution notices are
+incorporated here by reference, as required by Apache License 2.0 section 4(d).
+
+The exact versions bundled in any given release are recorded in uv.lock.
+
+Apache License, Version 2.0
+  1. boto3            Copyright Amazon.com, Inc. or its affiliates
+                      https://github.com/boto/boto3
+                      LICENSES/boto3/LICENSE, LICENSES/boto3/NOTICE
+  2. botocore         Copyright Amazon.com, Inc. or its affiliates
+                      https://github.com/boto/botocore
+                      LICENSES/botocore/LICENSE, LICENSES/botocore/NOTICE
+  3. s3transfer       Copyright Amazon.com, Inc. or its affiliates
+                      https://github.com/boto/s3transfer
+                      LICENSES/s3transfer/LICENSE, LICENSES/s3transfer/NOTICE
+  4. clickhouse-connect
+                      Copyright ClickHouse, Inc.
+                      https://github.com/ClickHouse/clickhouse-connect
+                      LICENSES/clickhouse-connect/LICENSE
+  5. tenacity         Copyright Julien Danjou and contributors
+                      https://github.com/jd/tenacity
+                      LICENSES/tenacity/LICENSE
+  6. python-dateutil  Copyright Paul Ganssle, Gustavo Niemeyer and contributors
+                      (dual-licensed Apache-2.0 / BSD-3-Clause)
+                      https://github.com/dateutil/dateutil
+                      LICENSES/python-dateutil/LICENSE
+
+MIT License
+  7. jmespath         Copyright Amazon.com, Inc. or its affiliates
+                      https://github.com/jmespath/jmespath.py
+                      LICENSES/jmespath/LICENSE
+  8. pytz             Copyright Stuart Bishop
+                      https://github.com/stub42/pytz
+                      LICENSES/pytz/LICENSE
+  9. six              Copyright Benjamin Peterson
+                      https://github.com/benjaminp/six
+                      LICENSES/six/LICENSE
+ 10. urllib3          Copyright Andrey Petrov and contributors
+                      https://github.com/urllib3/urllib3
+                      LICENSES/urllib3/LICENSE
+
+BSD 3-Clause License
+ 11. lz4              Copyright Steeve Morin, Jonathan Underwood and contributors
+                      https://github.com/python-lz4/python-lz4
+                      LICENSES/lz4/LICENSE
+ 12. zstandard        Copyright Gregory Szorc
+                      https://github.com/indygreg/python-zstandard
+                      LICENSES/zstandard/LICENSE
+
+Mozilla Public License 2.0
+ 13. certifi          Copyright Kenneth Reitz and contributors
+                      https://github.com/certifi/python-certifi
+                      LICENSES/certifi/LICENSE
+                      (Bundles a Mozilla CA certificate bundle; the certificate
+                      data is licensed under MPL 2.0.)
+
+
+--------------------------------------------------------------------------------
+Build tooling included in the image
+--------------------------------------------------------------------------------
+
+The image copies the `uv` and `uvx` binaries (/bin/uv, /bin/uvx) from the
+official Astral distribution. They are used to build the application
+environment and are not invoked at container runtime.
+
+ 14. uv               Copyright Astral Software Inc.
+                      https://github.com/astral-sh/uv
+                      Dual-licensed Apache-2.0 OR MIT
+                      LICENSES/uv/LICENSE-APACHE, LICENSES/uv/LICENSE-MIT
+
+
+--------------------------------------------------------------------------------
+Base image
+--------------------------------------------------------------------------------
+
+This image is built FROM python:3.14-slim, which provides the CPython runtime
+(Python Software Foundation License) and Debian OS packages. Those components
+remain subject to their own licenses, are not redistributed or modified by this
+project beyond inclusion in the base layers, and are not enumerated here.
