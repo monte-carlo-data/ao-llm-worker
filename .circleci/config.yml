@@ -75,11 +75,8 @@ workflows:
             tags:
               only: /^v.*/
       - build-and-push:
-          # Docker Hub publish context — must provide DOCKER_LOGIN and a scoped
-          # Docker Hub access token as DOCKER_PASSWORD, and must not be exposed
-          # to forked-PR builds.
           context:
-            - ao-llm-worker-dockerhub
+            - docker
           requires:
             - lint
             - test
