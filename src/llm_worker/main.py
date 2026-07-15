@@ -7,7 +7,6 @@ from collections.abc import Iterable
 from types import FrameType
 from uuid import UUID
 
-from botocore.exceptions import BotoCoreError, ClientError
 from clickhouse_connect.driver.exceptions import ClickHouseError
 from tenacity import (
     Retrying,
@@ -16,9 +15,10 @@ from tenacity import (
     wait_exponential,
 )
 
-from llm_worker.bedrock import BedrockClient
 from llm_worker.clickhouse import ClickHouseClient, LLMResult
 from llm_worker.config import load_config
+from llm_worker.executor import BatchExecutor
+from llm_worker.providers import create_provider
 from llm_worker.logging_setup import configure_logging
 
 configure_logging()
@@ -31,10 +31,10 @@ BATCH_STATUS_WRITE_MAX_ATTEMPTS = 3
 
 class LLMWorkerService:
     def __init__(
-        self, ch: ClickHouseClient, bedrock: BedrockClient, poll_interval: float
+        self, ch: ClickHouseClient, executor: BatchExecutor, poll_interval: float
     ):
         self._ch = ch
-        self._bedrock = bedrock
+        self._executor = executor
         self._poll_interval = poll_interval
         self._should_stop = False
 
@@ -52,7 +52,7 @@ class LLMWorkerService:
                         self.process_single_batch(batch_id)
                 else:
                     time.sleep(self._poll_interval)
-            except (ClickHouseError, ClientError, BotoCoreError) as exc:
+            except ClickHouseError as exc:
                 logger.error("polling_error", extra={"error": str(exc)})
                 if not self._should_stop:
                     time.sleep(self._poll_interval)
@@ -75,7 +75,7 @@ class LLMWorkerService:
                 "batch_page_fetched",
                 extra={"batch_id": str(batch_id), "rows": len(rows)},
             )
-            self._write_results_in_chunks(self._bedrock.process_batch_iter(rows))
+            self._write_results_in_chunks(self._executor.process_batch_iter(rows))
 
         if not saw_rows:
             total_rows, total_completed, total_failed = self._ch.get_batch_counts(
@@ -198,8 +198,14 @@ def run():
         pending_batch_limit=config.pending_batch_limit,
         batch_page_size=config.batch_page_size,
     )
-    bedrock = BedrockClient(config.bedrock)
-    service = LLMWorkerService(ch, bedrock, config.poll_interval)
+    provider = create_provider(config)
+    executor = BatchExecutor(
+        provider,
+        config.max_workers,
+        config.retry_max_attempts,
+        config.retry_max_backoff,
+    )
+    service = LLMWorkerService(ch, executor, config.poll_interval)
     service.run()
 
 

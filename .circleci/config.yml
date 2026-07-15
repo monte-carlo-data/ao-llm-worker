@@ -3,6 +3,32 @@ version: 2.1
 orbs:
   docker: circleci/docker@2.2.0
 
+commands:
+  license-drift-check:
+    description: >
+      Regenerate the platform's NOTICE + LICENSES/ from the just-built image and
+      fail if they differ from what's committed — so a dependency change can't
+      ship without its license artifacts being updated. Runs before the push.
+    parameters:
+      cloud:
+        type: string
+      image:
+        type: string
+    steps:
+      - run:
+          name: Verify license artifacts match the built image
+          command: |
+            python3 scripts/gen_licenses.py --cloud << parameters.cloud >> --image << parameters.image >>
+            git add -A licensing/<< parameters.cloud >>
+            if ! git diff --cached --quiet -- licensing/<< parameters.cloud >>; then
+              echo "ERROR: licensing/<< parameters.cloud >>/ is stale relative to the built image."
+              echo "Regenerate and commit:"
+              echo "  python scripts/gen_licenses.py --cloud << parameters.cloud >> --image <built-image>"
+              git --no-pager diff --cached -- licensing/<< parameters.cloud >>
+              exit 1
+            fi
+            echo "license artifacts for << parameters.cloud >> match the built image."
+
 jobs:
   lint:
     docker:
@@ -14,7 +40,7 @@ jobs:
           command: pip install uv
       - run:
           name: Install dependencies
-          command: uv sync --frozen
+          command: uv sync --frozen --all-extras
       - run:
           name: Ruff
           command: uv run ruff check src/ tests/
@@ -32,12 +58,15 @@ jobs:
           command: pip install uv
       - run:
           name: Install dependencies
-          command: uv sync --frozen
+          command: uv sync --frozen --all-extras
       - run:
           name: Unit tests
           command: uv run pytest
 
   build-and-push:
+    parameters:
+      cloud:
+        type: string
     machine:
       image: ubuntu-2204:current
     steps:
@@ -58,10 +87,40 @@ jobs:
           use-docker-credentials-store: true
       - docker/build:
           image: montecarlodata/ao-llm-worker
-          tag: ${VERSION_TAG},latest
+          tag: ${VERSION_TAG}-<< parameters.cloud >>,latest-<< parameters.cloud >>
+          extra_build_args: --build-arg CLOUD=<< parameters.cloud >>
+      - license-drift-check:
+          cloud: << parameters.cloud >>
+          image: montecarlodata/ao-llm-worker:${VERSION_TAG}-<< parameters.cloud >>
       - docker/push:
           image: montecarlodata/ao-llm-worker
-          tag: ${VERSION_TAG},latest
+          tag: ${VERSION_TAG}-<< parameters.cloud >>,latest-<< parameters.cloud >>
+
+  # Pre-release images from the dev branch, matching the AO helm chart's dev
+  # scheme (0.0.0-dev.g<sha> per-commit + 0.0.0-latest floating), platform-suffixed.
+  publish-dev:
+    parameters:
+      cloud:
+        type: string
+    machine:
+      image: ubuntu-2204:current
+    steps:
+      - checkout
+      - run:
+          name: Compute dev version from commit
+          command: echo "export DEV_VERSION=0.0.0-dev.g$(git rev-parse --short=7 HEAD)" >> "$BASH_ENV"
+      - docker/check:
+          use-docker-credentials-store: true
+      - docker/build:
+          image: montecarlodata/ao-llm-worker
+          tag: ${DEV_VERSION}-<< parameters.cloud >>,0.0.0-latest-<< parameters.cloud >>
+          extra_build_args: --build-arg CLOUD=<< parameters.cloud >>
+      - license-drift-check:
+          cloud: << parameters.cloud >>
+          image: montecarlodata/ao-llm-worker:${DEV_VERSION}-<< parameters.cloud >>
+      - docker/push:
+          image: montecarlodata/ao-llm-worker
+          tag: ${DEV_VERSION}-<< parameters.cloud >>,0.0.0-latest-<< parameters.cloud >>
 
 workflows:
   build-and-deploy:
@@ -74,7 +133,22 @@ workflows:
           filters:
             tags:
               only: /^v.*/
+      - publish-dev:
+          matrix:
+            parameters:
+              cloud: [aws, azure, gcp]
+          context:
+            - docker
+          requires:
+            - lint
+            - test
+          filters:
+            branches:
+              only: dev
       - build-and-push:
+          matrix:
+            parameters:
+              cloud: [aws, azure, gcp]
           context:
             - docker
           requires:

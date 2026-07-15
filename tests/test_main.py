@@ -4,7 +4,6 @@ from unittest.mock import MagicMock
 from uuid import UUID
 
 import pytest
-from botocore.exceptions import BotoCoreError
 from clickhouse_connect.driver.exceptions import ClickHouseError
 
 from llm_worker.clickhouse import LLMResult
@@ -113,7 +112,7 @@ class TestPollingLoop:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                raise BotoCoreError()
+                raise ClickHouseError("connection lost")
             if call_count >= 3:
                 signal.raise_signal(signal.SIGTERM)
             return []
@@ -133,7 +132,7 @@ class TestPollingLoop:
         with pytest.raises(RuntimeError, match="bug"):
             service.run()
 
-    def test_continues_after_bedrock_error_during_batch(self):
+    def test_continues_after_error_during_batch(self):
         ch = MagicMock()
         bedrock = MagicMock()
         call_count = 0
@@ -148,8 +147,7 @@ class TestPollingLoop:
             return []
 
         ch.get_pending_batches.side_effect = get_pending
-        ch.get_batch_rows.return_value = [MagicMock()]
-        bedrock.process_batch_iter.side_effect = BotoCoreError()
+        ch.get_batch_rows.side_effect = ClickHouseError("connection lost")
         service = _make_service(ch_mock=ch, bedrock_mock=bedrock, poll_interval=0.1)
 
         service.run()
