@@ -2,18 +2,14 @@ from uuid import UUID
 
 import pytest
 
-from llm_worker.bedrock import BedrockClient
 from llm_worker.config import BedrockConfig
+from llm_worker.executor import BatchExecutor
 from llm_worker.main import LLMWorkerService
+from llm_worker.providers.bedrock import BedrockProvider
 
 pytestmark = [pytest.mark.clickhouse]
 
-BEDROCK_CONFIG = BedrockConfig(
-    region="us-east-1",
-    max_workers=2,
-    retry_max_attempts=1,
-    retry_max_backoff=0,
-)
+BEDROCK_CONFIG = BedrockConfig(region="us-east-1")
 
 BATCH_1 = UUID("00000000-0000-0000-0000-000000000001")
 BATCH_2 = UUID("00000000-0000-0000-0000-000000000002")
@@ -73,8 +69,14 @@ def _get_batch_status(ch_client, batch_id):
 
 
 def _make_service(ch_client, mock_boto):
-    bedrock = BedrockClient(BEDROCK_CONFIG, boto_client=mock_boto)
-    return LLMWorkerService(ch_client, bedrock, poll_interval=1)
+    provider = BedrockProvider(BEDROCK_CONFIG, boto_client=mock_boto)
+    executor = BatchExecutor(
+        provider,
+        max_workers=2,
+        retry_max_attempts=1,
+        retry_max_backoff=0,
+    )
+    return LLMWorkerService(ch_client, executor, poll_interval=1)
 
 
 ROW_4 = UUID("00000000-0000-0000-0000-000000000014")
