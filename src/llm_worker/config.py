@@ -1,6 +1,11 @@
 import os
 from dataclasses import dataclass
 
+# Cloud platform each LLM provider runs on. Kept 1:1 with the per-cloud image
+# variants (see Dockerfile ARG CLOUD). The worker publishes its cloud so the
+# monolith can resolve a deployment's cloud-native model pool.
+_PROVIDER_TO_CLOUD = {"bedrock": "aws", "vertex": "gcp"}
+
 
 @dataclass(frozen=True)
 class ClickHouseConfig:
@@ -36,6 +41,11 @@ class ServiceConfig:
     poll_interval: float
     pending_batch_limit: int
     batch_page_size: int
+
+    @property
+    def cloud(self) -> str:
+        """Cloud platform for this deployment, derived from the LLM provider."""
+        return _PROVIDER_TO_CLOUD.get(self.provider, self.provider)
 
 
 def _parse_env_int(name: str, default: str, *, min_val: int = 1) -> int:

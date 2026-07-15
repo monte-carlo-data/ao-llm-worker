@@ -205,6 +205,15 @@ def run():
         config.retry_max_attempts,
         config.retry_max_backoff,
     )
+    # Best-effort: publish this worker's cloud/provider for the monolith's
+    # cloud-native model resolution. Non-critical metadata — a failure here
+    # (e.g. the llm_worker_info table not yet migrated) must not stop batch
+    # processing, so log and continue.
+    try:
+        ch.write_worker_info(config.cloud, config.provider)
+    except ClickHouseError as exc:
+        logger.warning("worker_info_write_failed", extra={"error": str(exc)})
+
     service = LLMWorkerService(ch, executor, config.poll_interval)
     service.run()
 

@@ -42,6 +42,21 @@ def _insert_pending_batch(ch_client, batch_id):
     ch_client.write_batch_status(batch_id, "pending")
 
 
+class TestWriteWorkerInfo:
+    def test_writes_row(self, ch_client):
+        ch_client.write_worker_info("aws", "bedrock")
+        result = ch_client._client.query(
+            "SELECT cloud, provider FROM llm_worker_info FINAL ORDER BY updated_at DESC LIMIT 1"
+        )
+        assert result.result_rows[0] == ("aws", "bedrock")
+
+    def test_republish_keeps_single_row(self, ch_client):
+        ch_client.write_worker_info("gcp", "vertex")
+        ch_client.write_worker_info("gcp", "vertex")
+        result = ch_client._client.query("SELECT count() FROM llm_worker_info FINAL")
+        assert result.result_rows[0][0] == 1
+
+
 class TestGetPendingBatches:
     def test_no_pending_batches(self, ch_client):
         assert ch_client.get_pending_batches() == []
