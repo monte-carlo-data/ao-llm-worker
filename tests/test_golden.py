@@ -7,9 +7,10 @@ monolith↔worker contract with a shared artifact so the adapters can't drift.
 
 from types import SimpleNamespace
 
-from llm_worker.config import BedrockConfig, VertexConfig
+from llm_worker.config import BedrockConfig, FoundryConfig, VertexConfig
 from llm_worker.contract import ContractRequest, Tool
 from llm_worker.providers.bedrock import BedrockProvider
+from llm_worker.providers.foundry import FoundryProvider
 from llm_worker.providers.vertex import VertexProvider
 
 # --- shared canonical v1 input fixtures ---
@@ -42,10 +43,11 @@ def _bedrock(mock_boto):
 
 
 def _vertex(mock_client):
-    return VertexProvider(
-        VertexConfig("mc-proj", "global", "claude-sonnet-4-5@20250929"),
-        client=mock_client,
-    )
+    return VertexProvider(VertexConfig("mc-proj", "global"), client=mock_client)
+
+
+def _foundry(mock_client):
+    return FoundryProvider(FoundryConfig("mc-foundry"), client=mock_client)
 
 
 def _anthropic_response(content):
@@ -84,6 +86,19 @@ class TestInputTranslationFromSharedFixture:
         assert kw["tools"][0]["input_schema"] == GOLDEN_SCHEMA
         assert kw["tool_choice"] == {"type": "tool", "name": "evaluation_result"}
 
+    def test_foundry_translates_tool_request(self, mocker):
+        client = mocker.Mock()
+        client.messages.create.return_value = _anthropic_response(
+            [SimpleNamespace(type="text", text="")]
+        )
+
+        _foundry(client).complete(GOLDEN_TOOL_REQUEST)
+
+        kw = client.messages.create.call_args.kwargs
+        assert kw["tools"][0]["name"] == "evaluation_result"
+        assert kw["tools"][0]["input_schema"] == GOLDEN_SCHEMA
+        assert kw["tool_choice"] == {"type": "tool", "name": "evaluation_result"}
+
 
 class TestOutputEnvelopeGolden:
     def test_tool_branch_identical_envelope(self, mocker):
@@ -116,9 +131,22 @@ class TestOutputEnvelopeGolden:
         )
         vertex_env = _vertex(vclient).complete(GOLDEN_TOOL_REQUEST).output
 
+        fclient = mocker.Mock()
+        fclient.messages.create.return_value = _anthropic_response(
+            [
+                SimpleNamespace(
+                    type="tool_use",
+                    name="evaluation_result",
+                    input=GOLDEN_TOOL_OUTPUT,
+                )
+            ]
+        )
+        foundry_env = _foundry(fclient).complete(GOLDEN_TOOL_REQUEST).output
+
         assert (
             bedrock_env
             == vertex_env
+            == foundry_env
             == {"output_text": "", "tool_uses": [GOLDEN_TOOL_OUTPUT]}
         )
 
@@ -135,5 +163,11 @@ class TestOutputEnvelopeGolden:
         )
         vertex_env = _vertex(vclient).complete(GOLDEN_TEXT_REQUEST).output
 
-        assert bedrock_env == vertex_env == {"output_text": "a summary"}
+        fclient = mocker.Mock()
+        fclient.messages.create.return_value = _anthropic_response(
+            [SimpleNamespace(type="text", text="a summary")]
+        )
+        foundry_env = _foundry(fclient).complete(GOLDEN_TEXT_REQUEST).output
+
+        assert bedrock_env == vertex_env == foundry_env == {"output_text": "a summary"}
         assert "tool_uses" not in bedrock_env

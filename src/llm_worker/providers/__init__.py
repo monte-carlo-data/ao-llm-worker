@@ -34,7 +34,19 @@ def create_provider(config: ServiceConfig) -> LLMProvider:
         assert config.vertex is not None  # guaranteed by load_config
         return VertexProvider(config.vertex)
 
+    if config.provider == "foundry":
+        try:
+            from llm_worker.providers.foundry import FoundryProvider
+        except ImportError as e:
+            raise RuntimeError(
+                f"LLM_PROVIDER=foundry selected but its adapter/SDK is "
+                f"unavailable ({e}). Is this the azure image variant?"
+            ) from e
+
+        assert config.foundry is not None  # guaranteed by load_config
+        return FoundryProvider(config.foundry)
+
     raise ValueError(
         f"LLM_PROVIDER={config.provider!r} is not supported "
-        f"(expected 'bedrock' or 'vertex')"
+        f"(expected 'bedrock', 'vertex', or 'foundry')"
     )

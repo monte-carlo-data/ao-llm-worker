@@ -11,10 +11,12 @@ dependencies = [
 
 [project.optional-dependencies]
 # Keyed by cloud platform (the image variant), not the LLM backend: aws ships
-# the Bedrock SDK, gcp the Anthropic Vertex SDK. The runtime backend is selected
-# separately via LLM_PROVIDER (aws->bedrock, gcp->vertex).
+# the Bedrock SDK, gcp the Anthropic Vertex SDK, azure the Anthropic + Azure
+# identity SDKs. The runtime backend is selected separately via LLM_PROVIDER
+# (aws->bedrock, gcp->vertex, azure->foundry).
 aws = ["boto3>=1.42.0"]
 gcp = ["anthropic[vertex]>=0.40.0"]
+azure = ["anthropic>=0.116.0", "azure-identity>=1.19.0"]
 
 [dependency-groups]
 dev = [
@@ -27,10 +29,11 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
-addopts = ["-m", "not clickhouse and not vertex"]
+addopts = ["-m", "not clickhouse and not vertex and not azure"]
 markers = [
     "clickhouse: tests that require a running ClickHouse container",
     "vertex: tests that hit a live Vertex AI deployment (real credentials)",
+    "azure: tests that hit a live Microsoft Foundry deployment (real credentials)",
 ]
 
 [build-system]
