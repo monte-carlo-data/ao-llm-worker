@@ -246,7 +246,7 @@ def render_notice(cloud: str, packages: list[dict], has_uv: bool) -> str:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--cloud", required=True, choices=["aws", "gcp"])
+    ap.add_argument("--cloud", required=True, choices=["aws", "azure", "gcp"])
     ap.add_argument("--image", required=True, help="Built image ref to extract from")
     args = ap.parse_args()
 
