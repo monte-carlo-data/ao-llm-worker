@@ -4,7 +4,7 @@ from dataclasses import dataclass
 # Cloud platform each LLM provider runs on. Kept 1:1 with the per-cloud image
 # variants (see Dockerfile ARG CLOUD). The worker publishes its cloud so the
 # monolith can resolve a deployment's cloud-native model pool.
-_PROVIDER_TO_CLOUD = {"bedrock": "aws", "vertex": "gcp"}
+_PROVIDER_TO_CLOUD = {"bedrock": "aws", "vertex": "gcp", "foundry": "azure"}
 
 
 @dataclass(frozen=True)
@@ -26,7 +26,11 @@ class BedrockConfig:
 class VertexConfig:
     project: str
     region: str
-    model: str
+
+
+@dataclass(frozen=True)
+class FoundryConfig:
+    resource: str
 
 
 @dataclass(frozen=True)
@@ -38,6 +42,7 @@ class ServiceConfig:
     retry_max_backoff: int
     bedrock: BedrockConfig | None
     vertex: VertexConfig | None
+    foundry: FoundryConfig | None
     poll_interval: float
     pending_batch_limit: int
     batch_page_size: int
@@ -79,27 +84,34 @@ def _require_env(name: str) -> str:
 
 def _load_provider_config(
     provider: str,
-) -> tuple[BedrockConfig | None, VertexConfig | None]:
+) -> tuple[BedrockConfig | None, VertexConfig | None, FoundryConfig | None]:
     if provider == "bedrock":
         region = os.environ.get("AWS_REGION", "us-east-1")
-        return BedrockConfig(region=region), None
+        return BedrockConfig(region=region), None, None
     if provider == "vertex":
         return (
             None,
             VertexConfig(
                 project=_require_env("ANTHROPIC_VERTEX_PROJECT_ID"),
                 region=os.environ.get("CLOUD_ML_REGION", "global"),
-                model=_require_env("VERTEX_MODEL"),
             ),
+            None,
+        )
+    if provider == "foundry":
+        return (
+            None,
+            None,
+            FoundryConfig(resource=_require_env("ANTHROPIC_FOUNDRY_RESOURCE")),
         )
     raise ValueError(
-        f"LLM_PROVIDER={provider!r} is not supported (expected 'bedrock' or 'vertex')"
+        f"LLM_PROVIDER={provider!r} is not supported "
+        f"(expected 'bedrock', 'vertex', or 'foundry')"
     )
 
 
 def load_config() -> ServiceConfig:
     provider = os.environ.get("LLM_PROVIDER", "bedrock")
-    bedrock, vertex = _load_provider_config(provider)
+    bedrock, vertex, foundry = _load_provider_config(provider)
 
     return ServiceConfig(
         clickhouse=ClickHouseConfig(
@@ -116,6 +128,7 @@ def load_config() -> ServiceConfig:
         retry_max_backoff=_parse_env_int("RETRY_MAX_BACKOFF", "30"),
         bedrock=bedrock,
         vertex=vertex,
+        foundry=foundry,
         poll_interval=_parse_env_float("POLL_INTERVAL", "10"),
         pending_batch_limit=_parse_env_int("PENDING_BATCH_LIMIT", "100"),
         batch_page_size=_parse_env_int("BATCH_PAGE_SIZE", "100"),

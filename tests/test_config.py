@@ -14,6 +14,7 @@ def test_load_config_defaults():
     assert config.bedrock is not None
     assert config.bedrock.region == "us-east-1"
     assert config.vertex is None
+    assert config.foundry is None
     assert config.max_workers == 20
     assert config.retry_max_attempts == 5
     assert config.retry_max_backoff == 30
@@ -54,15 +55,26 @@ def test_load_vertex_config(monkeypatch):
     monkeypatch.setenv("LLM_PROVIDER", "vertex")
     monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "mc-proj")
     monkeypatch.setenv("CLOUD_ML_REGION", "us-east5")
-    monkeypatch.setenv("VERTEX_MODEL", "claude-sonnet-4-5@20250929")
 
     config = load_config()
     assert config.provider == "vertex"
     assert config.bedrock is None
+    assert config.foundry is None
     assert config.vertex is not None
     assert config.vertex.project == "mc-proj"
     assert config.vertex.region == "us-east5"
-    assert config.vertex.model == "claude-sonnet-4-5@20250929"
+
+
+def test_load_foundry_config(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "foundry")
+    monkeypatch.setenv("ANTHROPIC_FOUNDRY_RESOURCE", "mc-foundry")
+
+    config = load_config()
+    assert config.provider == "foundry"
+    assert config.bedrock is None
+    assert config.vertex is None
+    assert config.foundry is not None
+    assert config.foundry.resource == "mc-foundry"
 
 
 def test_cloud_derived_from_provider(monkeypatch):
@@ -73,14 +85,18 @@ def test_cloud_derived_from_provider(monkeypatch):
 def test_cloud_derived_from_provider_vertex(monkeypatch):
     monkeypatch.setenv("LLM_PROVIDER", "vertex")
     monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "mc-proj")
-    monkeypatch.setenv("VERTEX_MODEL", "claude-sonnet-4-6")
     assert load_config().cloud == "gcp"
+
+
+def test_cloud_derived_from_provider_foundry(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "foundry")
+    monkeypatch.setenv("ANTHROPIC_FOUNDRY_RESOURCE", "mc-foundry")
+    assert load_config().cloud == "azure"
 
 
 def test_vertex_region_defaults_to_global(monkeypatch):
     monkeypatch.setenv("LLM_PROVIDER", "vertex")
     monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "mc-proj")
-    monkeypatch.setenv("VERTEX_MODEL", "claude-sonnet-4-5@20250929")
     # CLOUD_ML_REGION not set → defaults to "global"
 
     config = load_config()
@@ -90,8 +106,15 @@ def test_vertex_region_defaults_to_global(monkeypatch):
 
 def test_vertex_missing_env_raises(monkeypatch):
     monkeypatch.setenv("LLM_PROVIDER", "vertex")
-    # ANTHROPIC_VERTEX_PROJECT_ID / VERTEX_MODEL not set
+    # ANTHROPIC_VERTEX_PROJECT_ID not set
     with pytest.raises(ValueError, match="ANTHROPIC_VERTEX_PROJECT_ID is required"):
+        load_config()
+
+
+def test_foundry_missing_env_raises(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "foundry")
+    # ANTHROPIC_FOUNDRY_RESOURCE not set
+    with pytest.raises(ValueError, match="ANTHROPIC_FOUNDRY_RESOURCE is required"):
         load_config()
 
 

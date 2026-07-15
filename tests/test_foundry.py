@@ -3,26 +3,24 @@ from types import SimpleNamespace
 import anthropic
 import httpx
 
-from llm_worker.config import VertexConfig
+from llm_worker.config import FoundryConfig
 from llm_worker.contract import ContractRequest, Tool, resolve_model_ref
 from llm_worker.providers.base import ErrorDisposition
-from llm_worker.providers.vertex import VertexProvider
+from llm_worker.providers.foundry import FoundryProvider
 
-VERTEX_CONFIG = VertexConfig(
-    project="mc-proj",
-    region="us-east5",
-)
+FOUNDRY_CONFIG = FoundryConfig(resource="mc-foundry")
 
 
 def _provider(mock_client):
-    return VertexProvider(VERTEX_CONFIG, client=mock_client)
+    # Passing a client skips _build_client, so Azure credentials are never used.
+    return FoundryProvider(FOUNDRY_CONFIG, client=mock_client)
 
 
 def _req(
     prompt="hello", max_output_tokens=512, temperature=0.0, tools=None, forced_tool=None
 ):
     return ContractRequest(
-        model_id="provider:claude-sonnet-4-5@20250929",
+        model_id="provider:claude-sonnet-4-5",
         prompt=prompt,
         max_output_tokens=max_output_tokens,
         temperature=temperature,
@@ -45,7 +43,7 @@ def _response(blocks, input_tokens=0, output_tokens=0):
 
 
 def _status_error(cls, status, message="err"):
-    request = httpx.Request("POST", "https://vertex.example.com")
+    request = httpx.Request("POST", "https://foundry.example.com")
     response = httpx.Response(status, request=request)
     return cls(message, response=response, body=None)
 
@@ -90,7 +88,7 @@ class TestComplete:
         _provider(client).complete(_req())
 
         assert client.messages.create.call_args.kwargs["model"] == resolve_model_ref(
-            "provider:claude-sonnet-4-5@20250929"
+            "provider:claude-sonnet-4-5"
         )
 
     def test_sends_max_tokens_and_temperature(self, mocker):
@@ -142,7 +140,7 @@ class TestClassifyError:
 
     def test_timeout_retries(self, mocker):
         provider = _provider(mocker.Mock())
-        request = httpx.Request("POST", "https://vertex.example.com")
+        request = httpx.Request("POST", "https://foundry.example.com")
         assert (
             provider.classify_error(anthropic.APITimeoutError(request=request))
             == ErrorDisposition.RETRY
