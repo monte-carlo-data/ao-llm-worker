@@ -65,6 +65,18 @@ def test_load_vertex_config(monkeypatch):
     assert config.vertex.model == "claude-sonnet-4-5@20250929"
 
 
+def test_cloud_derived_from_provider(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "bedrock")
+    assert load_config().cloud == "aws"
+
+
+def test_cloud_derived_from_provider_vertex(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "vertex")
+    monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "mc-proj")
+    monkeypatch.setenv("VERTEX_MODEL", "claude-sonnet-4-6")
+    assert load_config().cloud == "gcp"
+
+
 def test_vertex_region_defaults_to_global(monkeypatch):
     monkeypatch.setenv("LLM_PROVIDER", "vertex")
     monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "mc-proj")
