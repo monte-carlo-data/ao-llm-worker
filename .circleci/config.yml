@@ -136,7 +136,7 @@ workflows:
       - publish-dev:
           matrix:
             parameters:
-              cloud: [aws, azure, gcp]
+              cloud: [aws, gcp]
           context:
             - docker
           requires:
@@ -148,7 +148,7 @@ workflows:
       - build-and-push:
           matrix:
             parameters:
-              cloud: [aws, azure, gcp]
+              cloud: [aws, gcp]
           context:
             - docker
           requires:

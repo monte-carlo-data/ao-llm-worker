@@ -1,7 +1,7 @@
 # llm-worker
 
 Polling service that reads LLM evaluation batches from ClickHouse, invokes the
-configured LLM provider (AWS Bedrock, Azure OpenAI, or Vertex AI) in parallel,
+configured LLM provider (AWS Bedrock or Vertex AI) in parallel,
 and writes results back.
 
 ## How it works
@@ -46,12 +46,12 @@ All settings come from environment variables.
 ### LLM provider
 
 The worker talks to one LLM backend per deployment, selected by `LLM_PROVIDER`.
-Each cloud ships as its own image variant (built with `--build-arg CLOUD=<aws|azure|gcp>`),
+Each cloud ships as its own image variant (built with `--build-arg CLOUD=<aws|gcp>`),
 carrying only that backend's SDK.
 
 | Variable             | Default   | Description                                                  |
 | -------------------- | --------- | ------------------------------------------------------------ |
-| `LLM_PROVIDER`       | `bedrock` | `bedrock` (AWS), `azure_openai` (Azure), or `vertex` (GCP)   |
+| `LLM_PROVIDER`       | `bedrock` | `bedrock` (AWS) or `vertex` (GCP)                            |
 | `MAX_WORKERS`        | `20`      | Concurrent provider calls                                    |
 | `RETRY_MAX_ATTEMPTS` | `5`       | Max retries per call                                         |
 | `RETRY_MAX_BACKOFF`  | `30`      | Max backoff in seconds between retries                       |
@@ -63,14 +63,6 @@ Provider-specific settings — only the selected provider's vars are read:
 | Variable     | Default     | Description            |
 | ------------ | ----------- | ---------------------- |
 | `AWS_REGION` | `us-east-1` | AWS region for Bedrock |
-
-**`azure_openai`** (azure image) — auth via Entra workload identity (no key):
-
-| Variable                   | Default | Description                    |
-| -------------------------- | ------- | ------------------------------ |
-| `AZURE_OPENAI_ENDPOINT`    | —       | Azure OpenAI resource endpoint |
-| `AZURE_OPENAI_API_VERSION` | —       | REST API version               |
-| `AZURE_OPENAI_DEPLOYMENT`  | —       | Deployment name to invoke      |
 
 **`vertex`** (gcp image) — Claude on Vertex AI, auth via GKE Workload Identity (ADC, no key):
 
@@ -123,6 +115,6 @@ src/llm_worker/
   main.py         -- polling loop, batch orchestration, graceful shutdown
   executor.py     -- provider-agnostic thread pool, retry, and result mapping
   contract.py     -- MC eval contract v1 types + input normalization
-  providers/      -- pluggable LLM backends (bedrock, azure_openai, vertex)
+  providers/      -- pluggable LLM backends (bedrock, vertex)
   clickhouse.py   -- ClickHouse reads/writes for inputs, results, and batch status
 ```

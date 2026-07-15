@@ -17,8 +17,8 @@ licensing/uv/ (maintained by hand) and the Dockerfile copies it into the image
 directly; this script only records it in the generated NOTICE.
 
 Usage:
-    python scripts/gen_licenses.py --cloud aws   --image montecarlodata/ao-llm-worker:0.0.0-latest-aws
-    python scripts/gen_licenses.py --cloud azure --image montecarlodata/ao-llm-worker:0.0.0-latest-azure
+    python scripts/gen_licenses.py --cloud aws --image montecarlodata/ao-llm-worker:0.0.0-latest-aws
+    python scripts/gen_licenses.py --cloud gcp --image montecarlodata/ao-llm-worker:0.0.0-latest-gcp
 
 CI can run this against the freshly built image and `git diff --exit-code
 licensing/` to fail if the committed artifacts drift from what actually ships.
@@ -246,7 +246,7 @@ def render_notice(cloud: str, packages: list[dict], has_uv: bool) -> str:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--cloud", required=True, choices=["aws", "azure", "gcp"])
+    ap.add_argument("--cloud", required=True, choices=["aws", "gcp"])
     ap.add_argument("--image", required=True, help="Built image ref to extract from")
     args = ap.parse_args()
 

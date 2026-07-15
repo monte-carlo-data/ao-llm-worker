@@ -9,10 +9,10 @@ COPY --from=ghcr.io/astral-sh/uv:0.11.25 /uv /uvx /bin/
 
 WORKDIR /app
 
-# Which cloud-platform variant to build (aws | azure | gcp). Selects the
+# Which cloud-platform variant to build (aws | gcp). Selects the
 # optional-dependency extra so each image ships only that platform's LLM SDK.
 # The runtime backend is chosen separately via the LLM_PROVIDER env var
-# (aws->bedrock, azure->azure_openai, gcp->vertex).
+# (aws->bedrock, gcp->vertex).
 ARG CLOUD=aws
 
 COPY pyproject.toml uv.lock ./
