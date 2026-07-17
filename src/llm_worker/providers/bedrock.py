@@ -58,9 +58,32 @@ class BedrockProvider(LLMProvider):
         self._client = boto_client or boto3.client(
             "bedrock-runtime", region_name=config.region
         )
+        # Resolved model refs learned to reject a custom temperature — the
+        # adaptive-thinking models (Opus 4.7+, Sonnet 5) return a ValidationException
+        # "temperature is deprecated for this model". Per-model, not process-wide: the
+        # adapter honors model_id and only some models deprecate it (Haiku 4.5 still
+        # accepts it), so a shared flag would needlessly drop determinism for the rest.
+        self._omit_temperature: set[str] = set()
 
     def complete(self, request: ContractRequest) -> LLMResponse:
-        response = self._client.converse(**_build_converse_kwargs(request))
+        model = resolve_model_ref(request.model_id)
+        include_temperature = model not in self._omit_temperature
+        try:
+            response = self._client.converse(
+                **_build_converse_kwargs(
+                    request, model, include_temperature=include_temperature
+                )
+            )
+        except ClientError as exc:
+            if not include_temperature or not _is_temperature_rejection(exc):
+                raise
+            # Learn that this model rejects a custom temperature and retry once
+            # without it. Determinism degrades to the model default here.
+            logger.warning("bedrock_temperature_unsupported", extra={"model": model})
+            self._omit_temperature.add(model)
+            response = self._client.converse(
+                **_build_converse_kwargs(request, model, include_temperature=False)
+            )
         usage = response.get("usage", {})
         return LLMResponse(
             output=_extract_output(response),
@@ -78,14 +101,27 @@ class BedrockProvider(LLMProvider):
         return ErrorDisposition.FAIL_ROW
 
 
-def _build_converse_kwargs(request: ContractRequest) -> dict:
+def _is_temperature_rejection(exc: ClientError) -> bool:
+    error = exc.response.get("Error", {})
+    return (
+        error.get("Code") == "ValidationException"
+        and "temperature" in str(error.get("Message", "")).lower()
+    )
+
+
+def _build_converse_kwargs(
+    request: ContractRequest,
+    model: str | None = None,
+    *,
+    include_temperature: bool = True,
+) -> dict:
+    inference_config: dict = {"maxTokens": request.max_output_tokens}
+    if include_temperature:
+        inference_config["temperature"] = request.temperature
     kwargs = {
-        "modelId": resolve_model_ref(request.model_id),
+        "modelId": model if model is not None else resolve_model_ref(request.model_id),
         "messages": [{"role": "user", "content": [{"text": request.prompt}]}],
-        "inferenceConfig": {
-            "maxTokens": request.max_output_tokens,
-            "temperature": request.temperature,
-        },
+        "inferenceConfig": inference_config,
     }
     if request.tools:
         kwargs["toolConfig"] = _build_tool_config(request)
