@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import anthropic
 import httpx
+import pytest
 
 from llm_worker.config import FoundryConfig
 from llm_worker.contract import ContractRequest, Tool, resolve_model_ref
@@ -17,10 +18,15 @@ def _provider(mock_client):
 
 
 def _req(
-    prompt="hello", max_output_tokens=512, temperature=0.0, tools=None, forced_tool=None
+    prompt="hello",
+    max_output_tokens=512,
+    temperature=0.0,
+    tools=None,
+    forced_tool=None,
+    model_id="provider:claude-sonnet-4-5",
 ):
     return ContractRequest(
-        model_id="provider:claude-sonnet-4-5",
+        model_id=model_id,
         prompt=prompt,
         max_output_tokens=max_output_tokens,
         temperature=temperature,
@@ -121,6 +127,78 @@ class TestComplete:
             }
         ]
         assert kwargs["tool_choice"] == {"type": "tool", "name": "classify"}
+
+
+class TestTemperatureFallback:
+    """Some models (e.g. Claude Opus 4.8 on Foundry) reject a custom temperature
+    with 'temperature is deprecated for this model'. The adapter learns this
+    per-model and retries once without temperature."""
+
+    @staticmethod
+    def _reject():
+        return _status_error(
+            anthropic.BadRequestError,
+            400,
+            message="temperature is deprecated for this model",
+        )
+
+    def test_retries_without_temperature_on_rejection(self, mocker):
+        client = mocker.Mock()
+        client.messages.create.side_effect = [
+            self._reject(),
+            _response([_text_block("ok")]),
+        ]
+
+        response = _provider(client).complete(_req())
+
+        assert response.output == {"output_text": "ok"}
+        assert client.messages.create.call_count == 2
+        first, second = client.messages.create.call_args_list
+        assert "temperature" in first.kwargs
+        assert "temperature" not in second.kwargs
+
+    def test_learned_model_skips_temperature_on_next_call(self, mocker):
+        client = mocker.Mock()
+        client.messages.create.side_effect = [
+            self._reject(),
+            _response([_text_block("ok")]),
+            _response([_text_block("ok2")]),
+        ]
+        provider = _provider(client)
+
+        provider.complete(_req())  # rejects, then retries without temperature
+        provider.complete(
+            _req()
+        )  # same model: omit temperature up front (no re-reject)
+
+        assert client.messages.create.call_count == 3
+        assert "temperature" not in client.messages.create.call_args_list[2].kwargs
+
+    def test_rejection_is_per_model(self, mocker):
+        client = mocker.Mock()
+        client.messages.create.side_effect = [
+            self._reject(),
+            _response([_text_block("ok")]),
+            _response([_text_block("ok2")]),
+        ]
+        provider = _provider(client)
+
+        provider.complete(_req(model_id="provider:claude-opus-4-8"))  # learns to omit
+        provider.complete(_req(model_id="provider:claude-haiku-4-5"))  # unaffected
+
+        haiku_call = client.messages.create.call_args_list[2]
+        assert "temperature" in haiku_call.kwargs
+
+    def test_non_temperature_bad_request_reraises(self, mocker):
+        client = mocker.Mock()
+        client.messages.create.side_effect = _status_error(
+            anthropic.BadRequestError, 400, message="max_tokens exceeds the limit"
+        )
+
+        with pytest.raises(anthropic.BadRequestError):
+            _provider(client).complete(_req())
+
+        assert client.messages.create.call_count == 1
 
 
 class TestClassifyError:

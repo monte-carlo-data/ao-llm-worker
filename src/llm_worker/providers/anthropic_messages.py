@@ -12,8 +12,10 @@ Like the Bedrock adapter, this honors the row's ``model_id`` (resolved via
 
 Anthropic's tool-use API takes the flat ``{name, description, input_schema}``
 shape and ``{"type": "tool", "name": ...}`` choice — which is the MC contract
-v1 shape verbatim — so tool translation here is near-passthrough. Claude
-accepts ``temperature=0``, so there is no temperature-rejection fallback.
+v1 shape verbatim — so tool translation here is near-passthrough. Most Claude
+models accept ``temperature=0``, but some (e.g. Opus 4.8 on Foundry) reject a
+custom temperature outright — so this adapter learns, per model, to drop it and
+retry (see :meth:`AnthropicMessagesProvider.complete`).
 """
 
 import logging
@@ -22,6 +24,7 @@ from anthropic import (
     APIConnectionError,
     APITimeoutError,
     AuthenticationError,
+    BadRequestError,
     InternalServerError,
     PermissionDeniedError,
     RateLimitError,
@@ -38,9 +41,29 @@ class AnthropicMessagesProvider(LLMProvider):
 
     def __init__(self, client):
         self._client = client
+        # Resolved model refs learned to reject a custom temperature. Per-model,
+        # not process-wide: this adapter serves many models (it honors model_id),
+        # and only some deprecate temperature — a shared flag would needlessly
+        # strip determinism from the models that still accept it.
+        self._omit_temperature: set[str] = set()
 
     def complete(self, request: ContractRequest) -> LLMResponse:
-        response = self._client.messages.create(**_build_kwargs(request))
+        model = resolve_model_ref(request.model_id)
+        include_temperature = model not in self._omit_temperature
+        try:
+            response = self._client.messages.create(
+                **_build_kwargs(request, model, include_temperature=include_temperature)
+            )
+        except BadRequestError as exc:
+            if not include_temperature or not _is_temperature_rejection(exc):
+                raise
+            # Learn that this model rejects a custom temperature and retry once
+            # without it. Determinism degrades to the model default here.
+            logger.warning("anthropic_temperature_unsupported", extra={"model": model})
+            self._omit_temperature.add(model)
+            response = self._client.messages.create(
+                **_build_kwargs(request, model, include_temperature=False)
+            )
         return _to_llm_response(response)
 
     def classify_error(self, exc: BaseException) -> ErrorDisposition:
@@ -54,13 +77,20 @@ class AnthropicMessagesProvider(LLMProvider):
         return ErrorDisposition.FAIL_ROW  # BadRequestError, NotFoundError, other
 
 
-def _build_kwargs(request: ContractRequest) -> dict:
+def _is_temperature_rejection(exc: BadRequestError) -> bool:
+    return "temperature" in str(exc).lower()
+
+
+def _build_kwargs(
+    request: ContractRequest, model: str, *, include_temperature: bool
+) -> dict:
     kwargs: dict = {
-        "model": resolve_model_ref(request.model_id),
+        "model": model,
         "max_tokens": request.max_output_tokens,
-        "temperature": request.temperature,
         "messages": [{"role": "user", "content": request.prompt}],
     }
+    if include_temperature:
+        kwargs["temperature"] = request.temperature
     if request.tools:
         kwargs["tools"] = [
             {
