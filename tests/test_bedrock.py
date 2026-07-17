@@ -102,6 +102,11 @@ class TestBuildConverseKwargs:
         kw = _build_converse_kwargs(_req(tools=[Tool("t", "", {})], forced_tool=None))
         assert "toolChoice" not in kw["toolConfig"]
 
+    def test_omits_temperature_when_disabled(self):
+        kw = _build_converse_kwargs(_req(), include_temperature=False)
+        assert "temperature" not in kw["inferenceConfig"]
+        assert kw["inferenceConfig"]["maxTokens"] == 512
+
 
 class TestExtractOutput:
     def test_text_response(self):
@@ -193,6 +198,74 @@ class TestComplete:
 
         with pytest.raises(ClientError):
             _provider(mock_boto).complete(_req())
+
+
+class TestTemperatureFallback:
+    """Adaptive-thinking models (e.g. Claude Opus 4.8, Sonnet 5) reject a custom
+    temperature on Bedrock with ValidationException 'temperature is deprecated for
+    this model'. The adapter learns this per-model and retries once without it."""
+
+    @staticmethod
+    def _rejection():
+        return _client_error(
+            "ValidationException",
+            "The model returned the following errors: `temperature` is "
+            "deprecated for this model.",
+        )
+
+    def test_retries_without_temperature_on_rejection(self, mocker):
+        mock_boto = mocker.Mock()
+        mock_boto.converse.side_effect = [self._rejection(), _text_response("ok")]
+
+        response = _provider(mock_boto).complete(_req())
+
+        assert response.output == {"output_text": "ok"}
+        assert mock_boto.converse.call_count == 2
+        first, second = mock_boto.converse.call_args_list
+        assert "temperature" in first.kwargs["inferenceConfig"]
+        assert "temperature" not in second.kwargs["inferenceConfig"]
+
+    def test_learned_model_skips_temperature_on_next_call(self, mocker):
+        mock_boto = mocker.Mock()
+        mock_boto.converse.side_effect = [
+            self._rejection(),
+            _text_response("ok"),
+            _text_response("ok2"),
+        ]
+        provider = _provider(mock_boto)
+
+        provider.complete(_req())  # rejects, then retries without temperature
+        provider.complete(_req())  # same model: omit temperature up front
+
+        assert mock_boto.converse.call_count == 3
+        third = mock_boto.converse.call_args_list[2]
+        assert "temperature" not in third.kwargs["inferenceConfig"]
+
+    def test_rejection_is_per_model(self, mocker):
+        mock_boto = mocker.Mock()
+        mock_boto.converse.side_effect = [
+            self._rejection(),
+            _text_response("ok"),
+            _text_response("ok2"),
+        ]
+        provider = _provider(mock_boto)
+
+        provider.complete(_req(model_id="us.anthropic.claude-opus-4-8"))  # learns
+        provider.complete(_req(model_id="us.anthropic.claude-haiku-4-5"))  # unaffected
+
+        haiku_call = mock_boto.converse.call_args_list[2]
+        assert "temperature" in haiku_call.kwargs["inferenceConfig"]
+
+    def test_non_temperature_validation_reraises(self, mocker):
+        mock_boto = mocker.Mock()
+        mock_boto.converse.side_effect = _client_error(
+            "ValidationException", "maxTokens exceeds the model limit"
+        )
+
+        with pytest.raises(ClientError):
+            _provider(mock_boto).complete(_req())
+
+        assert mock_boto.converse.call_count == 1
 
 
 class TestClassifyError:
