@@ -13,8 +13,12 @@ def test_creates_bedrock_provider():
     assert isinstance(provider, BedrockProvider)
 
 
-def test_bedrock_path_does_not_import_vertex_module():
-    sys.modules.pop("llm_worker.providers.vertex", None)
+def test_bedrock_path_does_not_import_vertex_module(monkeypatch):
+    # Use monkeypatch.delitem (not a bare sys.modules.pop) so the original module is
+    # restored on teardown — otherwise the module stays absent and a later
+    # mocker.patch("...vertex.<sym>") re-imports a fresh copy, leaving that patch out
+    # of sync with symbols imported from the original module at collection time.
+    monkeypatch.delitem(sys.modules, "llm_worker.providers.vertex", raising=False)
     create_provider(load_config())
     assert "llm_worker.providers.vertex" not in sys.modules
 
