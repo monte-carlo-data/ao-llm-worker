@@ -26,11 +26,17 @@ class BedrockConfig:
 class VertexConfig:
     project: str
     region: str
+    # Per-request timeout (seconds) for the Anthropic client. Bounds a hung/slow
+    # upstream request so it fails fast (→ retry → failed row) instead of blocking
+    # the whole batch forever.
+    timeout: float = 120.0
 
 
 @dataclass(frozen=True)
 class FoundryConfig:
     resource: str
+    # See VertexConfig.timeout.
+    timeout: float = 120.0
 
 
 @dataclass(frozen=True)
@@ -86,14 +92,19 @@ def _load_provider_config(
     provider: str,
 ) -> tuple[BedrockConfig | None, VertexConfig | None, FoundryConfig | None]:
     if provider == "bedrock":
+        # Bedrock's timeouts are handled by botocore (bounded by default), so the
+        # Anthropic-client request timeout doesn't apply here.
         region = os.environ.get("AWS_REGION", "us-east-1")
         return BedrockConfig(region=region), None, None
+    # Anthropic-client providers (Vertex/Foundry) share one request timeout.
+    request_timeout = _parse_env_float("LLM_REQUEST_TIMEOUT_SECONDS", "120")
     if provider == "vertex":
         return (
             None,
             VertexConfig(
                 project=_require_env("ANTHROPIC_VERTEX_PROJECT_ID"),
                 region=os.environ.get("CLOUD_ML_REGION", "global"),
+                timeout=request_timeout,
             ),
             None,
         )
@@ -101,7 +112,10 @@ def _load_provider_config(
         return (
             None,
             None,
-            FoundryConfig(resource=_require_env("ANTHROPIC_FOUNDRY_RESOURCE")),
+            FoundryConfig(
+                resource=_require_env("ANTHROPIC_FOUNDRY_RESOURCE"),
+                timeout=request_timeout,
+            ),
         )
     raise ValueError(
         f"LLM_PROVIDER={provider!r} is not supported "

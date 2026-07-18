@@ -30,5 +30,7 @@ class FoundryProvider(AnthropicMessagesProvider):
             DefaultAzureCredential(), "https://ai.azure.com/.default"
         )
         return AnthropicFoundry(
-            resource=config.resource, azure_ad_token_provider=token_provider
+            resource=config.resource,
+            azure_ad_token_provider=token_provider,
+            timeout=config.timeout,
         )

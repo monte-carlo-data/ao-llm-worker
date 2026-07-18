@@ -63,6 +63,7 @@ def test_load_vertex_config(monkeypatch):
     assert config.vertex is not None
     assert config.vertex.project == "mc-proj"
     assert config.vertex.region == "us-east5"
+    assert config.vertex.timeout == 120.0
 
 
 def test_load_foundry_config(monkeypatch):
@@ -75,6 +76,20 @@ def test_load_foundry_config(monkeypatch):
     assert config.vertex is None
     assert config.foundry is not None
     assert config.foundry.resource == "mc-foundry"
+    assert config.foundry.timeout == 120.0
+
+
+def test_request_timeout_override(monkeypatch):
+    # A bounded per-request timeout on the Anthropic (Foundry/Vertex) client keeps a
+    # hung upstream request from wedging the whole batch (it raises APITimeoutError →
+    # retried → failed row instead of blocking forever). Configurable per deployment.
+    monkeypatch.setenv("LLM_PROVIDER", "foundry")
+    monkeypatch.setenv("ANTHROPIC_FOUNDRY_RESOURCE", "mc-foundry")
+    monkeypatch.setenv("LLM_REQUEST_TIMEOUT_SECONDS", "45")
+
+    config = load_config()
+    assert config.foundry is not None
+    assert config.foundry.timeout == 45.0
 
 
 def test_cloud_derived_from_provider(monkeypatch):

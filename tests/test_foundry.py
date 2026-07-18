@@ -129,6 +129,21 @@ class TestComplete:
         assert kwargs["tool_choice"] == {"type": "tool", "name": "classify"}
 
 
+class TestBuildClient:
+    def test_passes_timeout_to_client(self, mocker):
+        # A bounded timeout is essential: without it a hung Foundry request blocks the
+        # row (and the batch) forever. The client must receive config.timeout.
+        fake_foundry = mocker.patch("llm_worker.providers.foundry.AnthropicFoundry")
+        mocker.patch("azure.identity.DefaultAzureCredential")
+        mocker.patch(
+            "azure.identity.get_bearer_token_provider", return_value=lambda: "token"
+        )
+
+        FoundryProvider(FoundryConfig(resource="mc-foundry", timeout=90.0))
+
+        assert fake_foundry.call_args.kwargs["timeout"] == 90.0
+
+
 class TestTemperatureFallback:
     """Some models (e.g. Claude Opus 4.8 on Foundry) reject a custom temperature
     with 'temperature is deprecated for this model'. The adapter learns this

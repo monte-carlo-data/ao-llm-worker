@@ -18,5 +18,10 @@ class VertexProvider(AnthropicMessagesProvider):
         # AnthropicVertex resolves credentials via google.auth ADC (Workload
         # Identity on GKE); no key is passed. Tests inject a mock client.
         super().__init__(
-            client or AnthropicVertex(project_id=config.project, region=config.region)
+            client
+            or AnthropicVertex(
+                project_id=config.project,
+                region=config.region,
+                timeout=config.timeout,
+            )
         )

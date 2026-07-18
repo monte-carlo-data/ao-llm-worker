@@ -125,6 +125,17 @@ class TestComplete:
         assert kwargs["tool_choice"] == {"type": "tool", "name": "classify"}
 
 
+class TestBuildClient:
+    def test_passes_timeout_to_client(self, mocker):
+        # A bounded timeout keeps a hung Vertex request from wedging the batch; the
+        # client must receive config.timeout.
+        fake_vertex = mocker.patch("llm_worker.providers.vertex.AnthropicVertex")
+
+        VertexProvider(VertexConfig(project="mc-proj", region="global", timeout=90.0))
+
+        assert fake_vertex.call_args.kwargs["timeout"] == 90.0
+
+
 class TestClassifyError:
     def test_rate_limit_retries(self, mocker):
         provider = _provider(mocker.Mock())
