@@ -3,9 +3,10 @@
 # updates arrive automatically on each rebuild.
 FROM python:3.14-slim
 
-# Pinned to a uv release bundling astral-tokio-tar >= 0.6.1 (OLYM-7622); uv
-# 0.11.11+ carries the fix. A version tag (over :latest) keeps builds reproducible.
-COPY --from=ghcr.io/astral-sh/uv:0.11.25 /uv /uvx /bin/
+# Pinned to a uv release bundling astral-tokio-tar >= 0.6.1 (OLYM-7622) and
+# quinn-proto >= 0.11.15 (OLYM-7642); uv 0.11.26+ carries both fixes. A version
+# tag (over :latest) keeps builds reproducible.
+COPY --from=ghcr.io/astral-sh/uv:0.11.29 /uv /uvx /bin/
 
 WORKDIR /app
 
