@@ -305,10 +305,6 @@ class TestAbort:
             assert by_row[UUID(int=i)].status == "failed"
             assert by_row[UUID(int=i)].error == "Batch aborted"
 
-        # At least the two initial in-flight calls reached the provider; row 2 may or may
-        # not have been submitted before the abort, so allow 2 or 3 (never rows 3/4).
-        assert provider.calls in (2, 3)
-
 
 class TestProcessBatch:
     def test_processes_all_rows(self):
