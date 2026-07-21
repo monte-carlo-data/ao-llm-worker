@@ -171,18 +171,24 @@ class BatchExecutor:
         pending_inputs = iter(inputs)
         aborted_rows: list[LLMInput] = []
         with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
-            in_flight: set[Future[LLMResult]] = set()
+            # Map each in-flight future to its input row so a future cancelled during
+            # an abort can still be emitted as an aborted result rather than silently
+            # dropped — every row must be yielded exactly once.
+            in_flight: dict[Future[LLMResult], LLMInput] = {}
+
+            def submit(row: LLMInput) -> None:
+                in_flight[executor.submit(self.invoke, row, abort_event)] = row
 
             while len(in_flight) < self._max_workers:
                 try:
-                    row = next(pending_inputs)
+                    submit(next(pending_inputs))
                 except StopIteration:
                     break
-                in_flight.add(executor.submit(self.invoke, row, abort_event))
 
             while in_flight:
-                done, in_flight = wait(in_flight, return_when=FIRST_COMPLETED)
+                done, _ = wait(set(in_flight), return_when=FIRST_COMPLETED)
                 for future in done:
+                    del in_flight[future]
                     yield future.result()
 
                 if abort_event.is_set():
@@ -191,18 +197,20 @@ class BatchExecutor:
 
                 while len(in_flight) < self._max_workers:
                     try:
-                        row = next(pending_inputs)
+                        submit(next(pending_inputs))
                     except StopIteration:
                         break
-                    in_flight.add(executor.submit(self.invoke, row, abort_event))
 
             for future in in_flight:
                 future.cancel()
 
-            for future in in_flight:
+            for future, row in in_flight.items():
                 if future.cancelled():
-                    continue
-                yield future.result()
+                    # Submitted but never started before the abort — report it aborted
+                    # (via aborted_rows below) instead of dropping it silently.
+                    aborted_rows.append(row)
+                else:
+                    yield future.result()
 
         for row in aborted_rows:
             logger.info(

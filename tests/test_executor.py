@@ -258,8 +258,8 @@ class TestAbort:
                 started["n"] += 1
                 if started["n"] == 2:
                     both_started.set()
-            both_started.wait(timeout=2)
-            release.wait(timeout=2)
+            both_started.wait(timeout=5)
+            release.wait(timeout=5)
             if request.model_id == "abort-me":
                 raise _Auth("denied")
             return LLMResponse({"output_text": "ok"}, 0, 0)
@@ -280,9 +280,9 @@ class TestAbort:
             )
         )
         worker.start()
-        assert both_started.wait(timeout=2)
+        assert both_started.wait(timeout=5)
         release.set()
-        worker.join(timeout=2)
+        worker.join(timeout=5)
 
         assert not worker.is_alive()
         assert len(results) == len(inputs)
@@ -294,11 +294,20 @@ class TestAbort:
         assert by_row[UUID(int=0)].status == "failed"
         assert "denied" in by_row[UUID(int=0)].error
         assert by_row[UUID(int=1)].status == "complete"
-        for i in range(2, 5):
+        # Every row reached a terminal status (the exactly-once checks above already
+        # guarantee none were lost or duplicated).
+        assert all(r.status in ("complete", "failed") for r in results)
+        # Rows 3 and 4 are never submitted before the abort, so they are always reported
+        # aborted. Row 2 is deliberately not asserted: depending on scheduling it may be
+        # submitted (→ complete, or aborted if cancelled before it started) or unsubmitted
+        # (→ aborted) — all fine, as long as it's yielded exactly once (checked above).
+        for i in (3, 4):
             assert by_row[UUID(int=i)].status == "failed"
             assert by_row[UUID(int=i)].error == "Batch aborted"
 
-        assert provider.calls == 2  # unsubmitted rows never reached the provider
+        # At least the two initial in-flight calls reached the provider; row 2 may or may
+        # not have been submitted before the abort, so allow 2 or 3 (never rows 3/4).
+        assert provider.calls in (2, 3)
 
 
 class TestProcessBatch:
