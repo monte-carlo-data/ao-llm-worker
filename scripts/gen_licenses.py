@@ -32,6 +32,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -121,8 +122,10 @@ def best_url(pkg: dict) -> str:
         if key in urls:
             return urls[key]
     # Prefer a repo URL over changelog/release/docs pages that other keys point to.
+    # Match on the parsed hostname (not a substring) so a github.com/gitlab.com in a
+    # path or a look-alike host can't masquerade as the repo URL.
     for url in urls.values():
-        if "github.com" in url or "gitlab.com" in url:
+        if (urlparse(url).hostname or "").lower() in ("github.com", "gitlab.com"):
             return re.sub(r"/(blob|releases|tree)/.*$", "", url)
     return next(iter(urls.values()), "")
 
