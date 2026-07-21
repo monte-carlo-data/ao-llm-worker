@@ -143,6 +143,23 @@ class TestBuildClient:
 
         assert fake_foundry.call_args.kwargs["timeout"] == 90.0
 
+    def test_passes_resource_and_token_provider_to_client(self, mocker):
+        # Foundry builds its endpoint from `resource` and authenticates via a
+        # bearer-token provider (Entra ID); the client must receive both.
+        fake_foundry = mocker.patch("llm_worker.providers.foundry.AnthropicFoundry")
+        mocker.patch("azure.identity.DefaultAzureCredential")
+        mock_get_bearer = mocker.patch(
+            "azure.identity.get_bearer_token_provider", return_value=lambda: "token"
+        )
+
+        FoundryProvider(FoundryConfig(resource="mc-foundry"))
+
+        assert fake_foundry.call_args.kwargs["resource"] == "mc-foundry"
+        assert (
+            fake_foundry.call_args.kwargs["azure_ad_token_provider"]
+            == mock_get_bearer.return_value
+        )
+
 
 class TestTemperatureFallback:
     """Some models (e.g. Claude Opus 4.8 on Foundry) reject a custom temperature
@@ -259,3 +276,15 @@ class TestClassifyError:
             provider.classify_error(_status_error(anthropic.BadRequestError, 400))
             == ErrorDisposition.FAIL_ROW
         )
+
+    def test_connection_error_retries(self, mocker):
+        provider = _provider(mocker.Mock())
+        request = httpx.Request("POST", "https://foundry.example.com")
+        assert (
+            provider.classify_error(anthropic.APIConnectionError(request=request))
+            == ErrorDisposition.RETRY
+        )
+
+    def test_generic_exception_fails_row(self, mocker):
+        provider = _provider(mocker.Mock())
+        assert provider.classify_error(ValueError("boom")) == ErrorDisposition.FAIL_ROW

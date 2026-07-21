@@ -1,3 +1,5 @@
+import pytest
+
 from llm_worker.contract import (
     DEFAULT_MAX_OUTPUT_TOKENS,
     ContractRequest,
@@ -104,6 +106,26 @@ class TestBuildRequest:
 
     def test_auto_tool_choice_is_not_forced(self):
         cfg = {"tools": [{"name": "t", "input_schema": {}}], "tool_choice": "auto"}
+        req = build_request("m", "hi", {}, cfg)
+        assert req.forced_tool is None
+        assert len(req.tools) == 1
+
+    @pytest.mark.parametrize("v0_tool_choice", [{"auto": {}}, {"any": {}}])
+    def test_v0_dict_tool_choice_is_not_forced(self, v0_tool_choice):
+        # v0 (Bedrock) {"auto": {}} / {"any": {}} both mean "optional tool use",
+        # same as v1's plain "auto" string -- only {"tool": {"name": ...}} forces.
+        cfg = {
+            "tools": [
+                {
+                    "toolSpec": {
+                        "name": "t",
+                        "description": "",
+                        "inputSchema": {"json": {}},
+                    }
+                }
+            ],
+            "toolChoice": v0_tool_choice,
+        }
         req = build_request("m", "hi", {}, cfg)
         assert req.forced_tool is None
         assert len(req.tools) == 1

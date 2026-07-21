@@ -135,6 +135,16 @@ class TestBuildClient:
 
         assert fake_vertex.call_args.kwargs["timeout"] == 90.0
 
+    def test_passes_project_and_region_to_client(self, mocker):
+        # Vertex routes requests using project_id/region; the client must receive
+        # both from VertexConfig.
+        fake_vertex = mocker.patch("llm_worker.providers.vertex.AnthropicVertex")
+
+        VertexProvider(VertexConfig(project="mc-proj", region="us-east5"))
+
+        assert fake_vertex.call_args.kwargs["project_id"] == "mc-proj"
+        assert fake_vertex.call_args.kwargs["region"] == "us-east5"
+
 
 class TestClassifyError:
     def test_rate_limit_retries(self, mocker):
@@ -179,3 +189,15 @@ class TestClassifyError:
             provider.classify_error(_status_error(anthropic.BadRequestError, 400))
             == ErrorDisposition.FAIL_ROW
         )
+
+    def test_connection_error_retries(self, mocker):
+        provider = _provider(mocker.Mock())
+        request = httpx.Request("POST", "https://vertex.example.com")
+        assert (
+            provider.classify_error(anthropic.APIConnectionError(request=request))
+            == ErrorDisposition.RETRY
+        )
+
+    def test_generic_exception_fails_row(self, mocker):
+        provider = _provider(mocker.Mock())
+        assert provider.classify_error(ValueError("boom")) == ErrorDisposition.FAIL_ROW

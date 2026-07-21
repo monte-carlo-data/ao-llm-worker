@@ -211,7 +211,7 @@ def run():
     # processing, so log and continue.
     try:
         ch.write_worker_info(config.cloud, config.provider)
-    except ClickHouseError as exc:
+    except Exception as exc:  # noqa: BLE001 — best-effort metadata write must never block startup
         logger.warning("worker_info_write_failed", extra={"error": str(exc)})
 
     service = LLMWorkerService(ch, executor, config.poll_interval)

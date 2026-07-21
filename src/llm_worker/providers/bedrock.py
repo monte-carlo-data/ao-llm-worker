@@ -6,8 +6,6 @@ Converse API and back — re-nesting the flat contract tool spec into Bedrock's
 exceptions. Retry and orchestration live in the executor.
 """
 
-import logging
-
 import boto3
 from botocore.exceptions import (
     ClientError,
@@ -20,8 +18,6 @@ from botocore.exceptions import (
 from llm_worker.config import BedrockConfig
 from llm_worker.contract import ContractRequest, resolve_model_ref
 from llm_worker.providers.base import ErrorDisposition, LLMProvider, LLMResponse
-
-logger = logging.getLogger(__name__)
 
 NON_RETRYABLE_ERROR_CODES = {
     "AccessDeniedException",
@@ -67,23 +63,17 @@ class BedrockProvider(LLMProvider):
 
     def complete(self, request: ContractRequest) -> LLMResponse:
         model = resolve_model_ref(request.model_id)
-        include_temperature = model not in self._omit_temperature
-        try:
-            response = self._client.converse(
+        response = self._complete_with_temperature_fallback(
+            model,
+            call=lambda include_temperature: self._client.converse(
                 **_build_converse_kwargs(
                     request, model, include_temperature=include_temperature
                 )
-            )
-        except ClientError as exc:
-            if not include_temperature or not _is_temperature_rejection(exc):
-                raise
-            # Learn that this model rejects a custom temperature and retry once
-            # without it. Determinism degrades to the model default here.
-            logger.warning("bedrock_temperature_unsupported", extra={"model": model})
-            self._omit_temperature.add(model)
-            response = self._client.converse(
-                **_build_converse_kwargs(request, model, include_temperature=False)
-            )
+            ),
+            exception_type=ClientError,
+            is_rejection=_is_temperature_rejection,
+            log_event="bedrock_temperature_unsupported",
+        )
         usage = response.get("usage", {})
         return LLMResponse(
             output=_extract_output(response),
@@ -101,11 +91,20 @@ class BedrockProvider(LLMProvider):
         return ErrorDisposition.FAIL_ROW
 
 
+_TEMPERATURE_REJECTION_KEYWORDS = ("not support", "unsupported", "deprecated")
+
+
 def _is_temperature_rejection(exc: ClientError) -> bool:
     error = exc.response.get("Error", {})
-    return (
-        error.get("Code") == "ValidationException"
-        and "temperature" in str(error.get("Message", "")).lower()
+    if error.get("Code") != "ValidationException":
+        return False
+    message = str(error.get("Message", "")).lower()
+    # Genuine rejections read like "`temperature` is deprecated for this
+    # model" or "model does not support temperature" — not range/format
+    # validation errors like "temperature must be between 0.0 and 1.0", which
+    # must propagate rather than being swallowed and retried.
+    return "temperature" in message and any(
+        keyword in message for keyword in _TEMPERATURE_REJECTION_KEYWORDS
     )
 
 
@@ -153,7 +152,7 @@ def _extract_output(response: dict) -> dict:
             output_text += block["text"]
         elif block.get("toolUse"):
             tool_use = block["toolUse"]
-            if tool_use.get("input"):
+            if "input" in tool_use:
                 tool_uses.append(tool_use["input"])
 
     if tool_uses:

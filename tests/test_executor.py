@@ -103,6 +103,19 @@ class TestInvoke:
         assert "Invalid JSON" in result.error
         assert provider.calls == 0
 
+    def test_malformed_tool_config_fails_row_not_loop(self):
+        # Valid JSON, but the toolSpec is missing its required "name" key.
+        # build_request -> _normalize_tools -> _normalize_tool does unguarded
+        # `spec["name"]` access, which raises an uncaught KeyError that must
+        # not escape invoke() -- the row should come back failed instead.
+        provider = FakeProvider()
+        tool_config = json.dumps({"tools": [{"toolSpec": {"description": "x"}}]})
+
+        result = _executor(provider).invoke(_make_input(tool_config=tool_config))
+
+        assert result.status == "failed"
+        assert provider.calls == 0
+
     def test_preserves_batch_and_row_id(self):
         b = UUID("00000000-0000-0000-0000-000000000099")
         r = UUID("00000000-0000-0000-0000-000000000042")
@@ -229,6 +242,63 @@ class TestAbort:
         failed = [r for r in results if r.status == "failed"]
         assert len(failed) >= 2
         assert provider.calls < len(inputs)
+
+    def test_partitions_rows_when_abort_happens_with_concurrent_in_flight_calls(self):
+        # max_workers=2: two calls are genuinely in flight together. Both must
+        # clear invoke()'s abort_event check (and reach the provider) before
+        # either resolves, so this proves the abort disposition doesn't race
+        # ahead of a call that was already in flight when it happened.
+        lock = threading.Lock()
+        both_started = threading.Event()
+        release = threading.Event()
+        started = {"n": 0}
+
+        def side_effect(request):
+            with lock:
+                started["n"] += 1
+                if started["n"] == 2:
+                    both_started.set()
+            both_started.wait(timeout=2)
+            release.wait(timeout=2)
+            if request.model_id == "abort-me":
+                raise _Auth("denied")
+            return LLMResponse({"output_text": "ok"}, 0, 0)
+
+        provider = FakeProvider(side_effect)
+        inputs = [
+            _make_input(row_id=UUID(int=0), model_id="abort-me"),
+            _make_input(row_id=UUID(int=1), model_id="ok"),
+            _make_input(row_id=UUID(int=2), model_id="ok"),
+            _make_input(row_id=UUID(int=3), model_id="ok"),
+            _make_input(row_id=UUID(int=4), model_id="ok"),
+        ]
+
+        results: list = []
+        worker = threading.Thread(
+            target=lambda: results.extend(
+                _executor(provider, max_workers=2).process_batch_iter(inputs)
+            )
+        )
+        worker.start()
+        assert both_started.wait(timeout=2)
+        release.set()
+        worker.join(timeout=2)
+
+        assert not worker.is_alive()
+        assert len(results) == len(inputs)
+        row_ids = [r.row_id for r in results]
+        assert len(set(row_ids)) == len(inputs)  # every row yielded exactly once
+        assert set(row_ids) == {i.row_id for i in inputs}  # none lost
+
+        by_row = {r.row_id: r for r in results}
+        assert by_row[UUID(int=0)].status == "failed"
+        assert "denied" in by_row[UUID(int=0)].error
+        assert by_row[UUID(int=1)].status == "complete"
+        for i in range(2, 5):
+            assert by_row[UUID(int=i)].status == "failed"
+            assert by_row[UUID(int=i)].error == "Batch aborted"
+
+        assert provider.calls == 2  # unsubmitted rows never reached the provider
 
 
 class TestProcessBatch:

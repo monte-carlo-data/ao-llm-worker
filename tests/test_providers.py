@@ -1,5 +1,4 @@
 import sys
-from dataclasses import replace
 
 import pytest
 
@@ -59,7 +58,15 @@ def test_creates_foundry_provider(monkeypatch, mocker):
     assert isinstance(provider, FoundryProvider)
 
 
-def test_unknown_provider_raises():
-    config = replace(load_config(), provider="nonexistent_provider")
-    with pytest.raises(ValueError, match="not supported"):
-        create_provider(config)
+def test_creates_vertex_provider(monkeypatch, mocker):
+    monkeypatch.setenv("LLM_PROVIDER", "vertex")
+    monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "mc-proj")
+    # Patch the SDK client so no real GCP credentials are required (VertexProvider
+    # constructs AnthropicVertex directly, so patch at the adapter module).
+    mocker.patch(
+        "llm_worker.providers.vertex.AnthropicVertex", return_value=mocker.Mock()
+    )
+    from llm_worker.providers.vertex import VertexProvider
+
+    provider = create_provider(load_config())
+    assert isinstance(provider, VertexProvider)

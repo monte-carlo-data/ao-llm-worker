@@ -18,8 +18,6 @@ custom temperature outright — so this adapter learns, per model, to drop it an
 retry (see :meth:`AnthropicMessagesProvider.complete`).
 """
 
-import logging
-
 from anthropic import (
     APIConnectionError,
     APITimeoutError,
@@ -32,8 +30,6 @@ from anthropic import (
 
 from llm_worker.contract import ContractRequest, resolve_model_ref
 from llm_worker.providers.base import ErrorDisposition, LLMProvider, LLMResponse
-
-logger = logging.getLogger(__name__)
 
 
 class AnthropicMessagesProvider(LLMProvider):
@@ -49,21 +45,15 @@ class AnthropicMessagesProvider(LLMProvider):
 
     def complete(self, request: ContractRequest) -> LLMResponse:
         model = resolve_model_ref(request.model_id)
-        include_temperature = model not in self._omit_temperature
-        try:
-            response = self._client.messages.create(
+        response = self._complete_with_temperature_fallback(
+            model,
+            call=lambda include_temperature: self._client.messages.create(
                 **_build_kwargs(request, model, include_temperature=include_temperature)
-            )
-        except BadRequestError as exc:
-            if not include_temperature or not _is_temperature_rejection(exc):
-                raise
-            # Learn that this model rejects a custom temperature and retry once
-            # without it. Determinism degrades to the model default here.
-            logger.warning("anthropic_temperature_unsupported", extra={"model": model})
-            self._omit_temperature.add(model)
-            response = self._client.messages.create(
-                **_build_kwargs(request, model, include_temperature=False)
-            )
+            ),
+            exception_type=BadRequestError,
+            is_rejection=_is_temperature_rejection,
+            log_event="anthropic_temperature_unsupported",
+        )
         return _to_llm_response(response)
 
     def classify_error(self, exc: BaseException) -> ErrorDisposition:
@@ -77,8 +67,18 @@ class AnthropicMessagesProvider(LLMProvider):
         return ErrorDisposition.FAIL_ROW  # BadRequestError, NotFoundError, other
 
 
+_TEMPERATURE_REJECTION_KEYWORDS = ("not support", "unsupported", "deprecated")
+
+
 def _is_temperature_rejection(exc: BadRequestError) -> bool:
-    return "temperature" in str(exc).lower()
+    # Genuine rejections read like "temperature is deprecated for this
+    # model" or "model does not support temperature" — not range/format
+    # validation errors like "temperature must be between 0 and 1", which
+    # must propagate rather than being swallowed and retried.
+    message = str(exc).lower()
+    return "temperature" in message and any(
+        keyword in message for keyword in _TEMPERATURE_REJECTION_KEYWORDS
+    )
 
 
 def _build_kwargs(

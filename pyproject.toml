@@ -1,7 +1,7 @@
 [project]
 name = "llm-worker"
 version = "0.1.0"
-description = "Service that polls ClickHouse for LLM evaluation inputs, calls Bedrock, and writes results back"
+description = "Service that polls ClickHouse for LLM evaluation inputs, calls the configured LLM provider, and writes results back"
 requires-python = ">=3.14"
 scripts = { llm-worker = "llm_worker.main:run" }
 dependencies = [

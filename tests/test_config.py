@@ -1,6 +1,6 @@
 import pytest
 
-from llm_worker.config import load_config
+from llm_worker.config import BedrockConfig, FoundryConfig, VertexConfig, load_config
 
 
 def test_load_config_defaults():
@@ -11,10 +11,8 @@ def test_load_config_defaults():
     assert config.clickhouse.password == ""
     assert config.clickhouse.database == "default"
     assert config.provider == "bedrock"
-    assert config.bedrock is not None
-    assert config.bedrock.region == "us-east-1"
-    assert config.vertex is None
-    assert config.foundry is None
+    assert isinstance(config.provider_config, BedrockConfig)
+    assert config.provider_config.region == "us-east-1"
     assert config.max_workers == 20
     assert config.retry_max_attempts == 5
     assert config.retry_max_backoff == 30
@@ -42,8 +40,8 @@ def test_load_config_from_env(monkeypatch):
     assert config.clickhouse.password == "secret"
     assert config.clickhouse.database == "mydb"
     assert config.provider == "bedrock"
-    assert config.bedrock is not None
-    assert config.bedrock.region == "us-west-2"
+    assert isinstance(config.provider_config, BedrockConfig)
+    assert config.provider_config.region == "us-west-2"
     assert config.max_workers == 50
     assert config.retry_max_attempts == 3
     assert config.retry_max_backoff == 60
@@ -58,12 +56,10 @@ def test_load_vertex_config(monkeypatch):
 
     config = load_config()
     assert config.provider == "vertex"
-    assert config.bedrock is None
-    assert config.foundry is None
-    assert config.vertex is not None
-    assert config.vertex.project == "mc-proj"
-    assert config.vertex.region == "us-east5"
-    assert config.vertex.timeout == 120.0
+    assert isinstance(config.provider_config, VertexConfig)
+    assert config.provider_config.project == "mc-proj"
+    assert config.provider_config.region == "us-east5"
+    assert config.provider_config.timeout == 120.0
 
 
 def test_load_foundry_config(monkeypatch):
@@ -72,11 +68,9 @@ def test_load_foundry_config(monkeypatch):
 
     config = load_config()
     assert config.provider == "foundry"
-    assert config.bedrock is None
-    assert config.vertex is None
-    assert config.foundry is not None
-    assert config.foundry.resource == "mc-foundry"
-    assert config.foundry.timeout == 120.0
+    assert isinstance(config.provider_config, FoundryConfig)
+    assert config.provider_config.resource == "mc-foundry"
+    assert config.provider_config.timeout == 120.0
 
 
 def test_request_timeout_override(monkeypatch):
@@ -88,8 +82,8 @@ def test_request_timeout_override(monkeypatch):
     monkeypatch.setenv("LLM_REQUEST_TIMEOUT_SECONDS", "45")
 
     config = load_config()
-    assert config.foundry is not None
-    assert config.foundry.timeout == 45.0
+    assert isinstance(config.provider_config, FoundryConfig)
+    assert config.provider_config.timeout == 45.0
 
 
 def test_cloud_derived_from_provider(monkeypatch):
@@ -115,8 +109,8 @@ def test_vertex_region_defaults_to_global(monkeypatch):
     # CLOUD_ML_REGION not set → defaults to "global"
 
     config = load_config()
-    assert config.vertex is not None
-    assert config.vertex.region == "global"
+    assert isinstance(config.provider_config, VertexConfig)
+    assert config.provider_config.region == "global"
 
 
 def test_vertex_missing_env_raises(monkeypatch):

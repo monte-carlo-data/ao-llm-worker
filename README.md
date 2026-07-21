@@ -1,8 +1,8 @@
 # llm-worker
 
 Polling service that reads LLM evaluation batches from ClickHouse, invokes the
-configured LLM provider (AWS Bedrock or Vertex AI) in parallel,
-and writes results back.
+configured LLM provider (AWS Bedrock, Vertex AI, or Microsoft Foundry) in
+parallel, and writes results back.
 
 ## How it works
 
@@ -46,12 +46,12 @@ All settings come from environment variables.
 ### LLM provider
 
 The worker talks to one LLM backend per deployment, selected by `LLM_PROVIDER`.
-Each cloud ships as its own image variant (built with `--build-arg CLOUD=<aws|gcp>`),
+Each cloud ships as its own image variant (built with `--build-arg CLOUD=<aws|gcp|azure>`),
 carrying only that backend's SDK.
 
 | Variable             | Default   | Description                                                  |
 | -------------------- | --------- | ------------------------------------------------------------ |
-| `LLM_PROVIDER`       | `bedrock` | `bedrock` (AWS) or `vertex` (GCP)                            |
+| `LLM_PROVIDER`       | `bedrock` | `bedrock` (AWS), `vertex` (GCP), or `foundry` (Azure)        |
 | `MAX_WORKERS`        | `20`      | Concurrent provider calls                                    |
 | `RETRY_MAX_ATTEMPTS` | `5`       | Max retries per call                                         |
 | `RETRY_MAX_BACKOFF`  | `30`      | Max backoff in seconds between retries                       |
@@ -66,11 +66,20 @@ Provider-specific settings — only the selected provider's vars are read:
 
 **`vertex`** (gcp image) — Claude on Vertex AI, auth via GKE Workload Identity (ADC, no key):
 
-| Variable                      | Default  | Description               |
-| ----------------------------- | -------- | ------------------------- |
-| `ANTHROPIC_VERTEX_PROJECT_ID` | —        | GCP project id            |
-| `CLOUD_ML_REGION`             | `global` | Vertex region             |
-| `VERTEX_MODEL`                | —        | Vertex model id to invoke |
+| Variable                      | Default  | Description                                             |
+| ----------------------------- | -------- | -------------------------------------------------------- |
+| `ANTHROPIC_VERTEX_PROJECT_ID` | —        | GCP project id                                          |
+| `CLOUD_ML_REGION`             | `global` | Vertex region                                           |
+| `LLM_REQUEST_TIMEOUT_SECONDS` | `120`    | Per-request timeout (seconds) for the Anthropic client  |
+
+Model selection is per-request via each input row's `model_id`, not env-configured.
+
+**`foundry`** (azure image) — Claude on Microsoft Foundry, auth via Entra ID (`DefaultAzureCredential`, no static secret):
+
+| Variable                      | Default | Description                                             |
+| ----------------------------- | ------- | -------------------------------------------------------- |
+| `ANTHROPIC_FOUNDRY_RESOURCE`  | —       | Microsoft Foundry resource name                         |
+| `LLM_REQUEST_TIMEOUT_SECONDS` | `120`   | Per-request timeout (seconds) for the Anthropic client  |
 
 ### Service
 
@@ -115,6 +124,6 @@ src/llm_worker/
   main.py         -- polling loop, batch orchestration, graceful shutdown
   executor.py     -- provider-agnostic thread pool, retry, and result mapping
   contract.py     -- MC eval contract v1 types + input normalization
-  providers/      -- pluggable LLM backends (bedrock, vertex)
+  providers/      -- pluggable LLM backends (bedrock, vertex, foundry)
   clickhouse.py   -- ClickHouse reads/writes for inputs, results, and batch status
 ```

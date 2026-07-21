@@ -36,6 +36,7 @@ GOLDEN_TEXT_REQUEST = ContractRequest(
     forced_tool=None,
 )
 GOLDEN_TOOL_OUTPUT = {"score": 0.9}
+EMPTY_TOOL_OUTPUT: dict = {}
 
 
 def _bedrock(mock_boto):
@@ -148,6 +149,55 @@ class TestOutputEnvelopeGolden:
             == vertex_env
             == foundry_env
             == {"output_text": "", "tool_uses": [GOLDEN_TOOL_OUTPUT]}
+        )
+
+    def test_empty_tool_output_envelope_parity(self, mocker):
+        boto = mocker.Mock()
+        boto.converse.return_value = {
+            "output": {
+                "message": {
+                    "content": [
+                        {
+                            "toolUse": {
+                                "name": "evaluation_result",
+                                "input": EMPTY_TOOL_OUTPUT,
+                            }
+                        }
+                    ]
+                }
+            }
+        }
+        bedrock_env = _bedrock(boto).complete(GOLDEN_TOOL_REQUEST).output
+
+        vclient = mocker.Mock()
+        vclient.messages.create.return_value = _anthropic_response(
+            [
+                SimpleNamespace(
+                    type="tool_use",
+                    name="evaluation_result",
+                    input=EMPTY_TOOL_OUTPUT,
+                )
+            ]
+        )
+        vertex_env = _vertex(vclient).complete(GOLDEN_TOOL_REQUEST).output
+
+        fclient = mocker.Mock()
+        fclient.messages.create.return_value = _anthropic_response(
+            [
+                SimpleNamespace(
+                    type="tool_use",
+                    name="evaluation_result",
+                    input=EMPTY_TOOL_OUTPUT,
+                )
+            ]
+        )
+        foundry_env = _foundry(fclient).complete(GOLDEN_TOOL_REQUEST).output
+
+        assert (
+            bedrock_env
+            == vertex_env
+            == foundry_env
+            == {"output_text": "", "tool_uses": [EMPTY_TOOL_OUTPUT]}
         )
 
     def test_text_branch_identical_envelope(self, mocker):

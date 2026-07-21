@@ -93,6 +93,9 @@ class BatchExecutor:
             tool_config = (
                 json.loads(input_row.tool_config) if input_row.tool_config else {}
             )
+            request = build_request(
+                input_row.model_id, input_row.prompt, params, tool_config
+            )
         except json.JSONDecodeError as e:
             logger.warning(
                 "row_invalid_json",
@@ -105,10 +108,18 @@ class BatchExecutor:
                 status="failed",
                 error=f"Invalid JSON in params or tool_config: {e}",
             )
-
-        request = build_request(
-            input_row.model_id, input_row.prompt, params, tool_config
-        )
+        except (KeyError, TypeError, AttributeError, ValueError) as e:
+            logger.warning(
+                "row_invalid_contract",
+                extra={"row_id": str(input_row.row_id), "error": str(e)},
+            )
+            return LLMResult(
+                batch_id=input_row.batch_id,
+                row_id=input_row.row_id,
+                response="",
+                status="failed",
+                error=f"Malformed params or tool_config: {e}",
+            )
 
         try:
             response = self._complete_with_retry(request)

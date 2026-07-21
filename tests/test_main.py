@@ -1,13 +1,13 @@
 import signal
 import time
-from unittest.mock import MagicMock
+from unittest.mock import ANY, MagicMock
 from uuid import UUID
 
 import pytest
 from clickhouse_connect.driver.exceptions import ClickHouseError
 
 from llm_worker.clickhouse import LLMResult
-from llm_worker.main import LLMWorkerService
+from llm_worker.main import LLMWorkerService, run
 
 BATCH_1 = UUID("00000000-0000-0000-0000-000000000001")
 BATCH_2 = UUID("00000000-0000-0000-0000-000000000002")
@@ -378,3 +378,29 @@ class TestBatchStatusWrite:
         service.process_single_batch(BATCH_1)
 
         ch.write_batch_status.assert_called_once_with(BATCH_1, "complete", 3, 2, 1)
+
+
+class TestRunStartup:
+    def test_run_survives_non_clickhouse_error_from_write_worker_info(self, mocker):
+        mock_config = mocker.MagicMock()
+        mocker.patch("llm_worker.main.load_config", return_value=mock_config)
+
+        mock_ch = mocker.MagicMock()
+        mock_ch.write_worker_info.side_effect = RuntimeError("boom")
+        mocker.patch("llm_worker.main.ClickHouseClient", return_value=mock_ch)
+
+        mocker.patch("llm_worker.main.create_provider", return_value=mocker.MagicMock())
+
+        mock_service = mocker.MagicMock()
+        mock_service_cls = mocker.patch(
+            "llm_worker.main.LLMWorkerService", return_value=mock_service
+        )
+
+        # write_worker_info is best-effort: a non-ClickHouseError bug in it must
+        # not prevent the worker from starting the actual service loop.
+        run()
+
+        mock_service_cls.assert_called_once_with(
+            mock_ch, ANY, mock_config.poll_interval
+        )
+        mock_service.run.assert_called_once()

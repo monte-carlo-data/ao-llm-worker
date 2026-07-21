@@ -267,6 +267,24 @@ class TestTemperatureFallback:
 
         assert mock_boto.converse.call_count == 1
 
+    def test_out_of_range_temperature_is_not_treated_as_rejection(self, mocker):
+        """A ValidationException that merely mentions 'temperature' because the
+        value is out of range is a real input error, not a model-level rejection
+        of the parameter — it must not be swallowed-and-retried, and must not
+        poison _omit_temperature for later calls to the same model."""
+        mock_boto = mocker.Mock()
+        mock_boto.converse.side_effect = _client_error(
+            "ValidationException",
+            "temperature must be between 0.0 and 1.0",
+        )
+        provider = _provider(mock_boto)
+
+        with pytest.raises(ClientError):
+            provider.complete(_req(model_id="model-1"))
+
+        assert mock_boto.converse.call_count == 1
+        assert "model-1" not in provider._omit_temperature
+
 
 class TestClassifyError:
     def test_access_denied_aborts_batch(self, mocker):

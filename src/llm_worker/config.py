@@ -1,10 +1,6 @@
 import os
 from dataclasses import dataclass
-
-# Cloud platform each LLM provider runs on. Kept 1:1 with the per-cloud image
-# variants (see Dockerfile ARG CLOUD). The worker publishes its cloud so the
-# monolith can resolve a deployment's cloud-native model pool.
-_PROVIDER_TO_CLOUD = {"bedrock": "aws", "vertex": "gcp", "foundry": "azure"}
+from typing import ClassVar
 
 
 @dataclass(frozen=True)
@@ -17,13 +13,22 @@ class ClickHouseConfig:
     ca_cert: str
 
 
+# Each provider config carries its own identity — the LLM_PROVIDER name and the
+# cloud platform it runs on (kept 1:1 with the per-cloud image variants; see
+# Dockerfile ARG CLOUD). `provider`/`cloud` are ClassVars (not init fields), so
+# the config's *type* is the single source of truth for which provider it is —
+# there is no separate discriminator string to keep in sync.
 @dataclass(frozen=True)
 class BedrockConfig:
+    provider: ClassVar[str] = "bedrock"
+    cloud: ClassVar[str] = "aws"
     region: str
 
 
 @dataclass(frozen=True)
 class VertexConfig:
+    provider: ClassVar[str] = "vertex"
+    cloud: ClassVar[str] = "gcp"
     project: str
     region: str
     # Per-request timeout (seconds) for the Anthropic client. Bounds a hung/slow
@@ -34,29 +39,38 @@ class VertexConfig:
 
 @dataclass(frozen=True)
 class FoundryConfig:
+    provider: ClassVar[str] = "foundry"
+    cloud: ClassVar[str] = "azure"
     resource: str
     # See VertexConfig.timeout.
     timeout: float = 120.0
 
 
+# The one provider config for this deployment — exactly one variant, so illegal
+# states (no provider, or two providers at once) are unrepresentable.
+ProviderConfig = BedrockConfig | VertexConfig | FoundryConfig
+
+
 @dataclass(frozen=True)
 class ServiceConfig:
     clickhouse: ClickHouseConfig
-    provider: str
+    provider_config: ProviderConfig
     max_workers: int
     retry_max_attempts: int
     retry_max_backoff: int
-    bedrock: BedrockConfig | None
-    vertex: VertexConfig | None
-    foundry: FoundryConfig | None
     poll_interval: float
     pending_batch_limit: int
     batch_page_size: int
 
     @property
+    def provider(self) -> str:
+        """LLM_PROVIDER name for this deployment (from the provider config's type)."""
+        return self.provider_config.provider
+
+    @property
     def cloud(self) -> str:
-        """Cloud platform for this deployment, derived from the LLM provider."""
-        return _PROVIDER_TO_CLOUD.get(self.provider, self.provider)
+        """Cloud platform for this deployment (from the provider config's type)."""
+        return self.provider_config.cloud
 
 
 def _parse_env_int(name: str, default: str, *, min_val: int = 1) -> int:
@@ -88,44 +102,50 @@ def _require_env(name: str) -> str:
     return value
 
 
-def _load_provider_config(
-    provider: str,
-) -> tuple[BedrockConfig | None, VertexConfig | None, FoundryConfig | None]:
-    if provider == "bedrock":
-        # Bedrock's timeouts are handled by botocore (bounded by default), so the
-        # Anthropic-client request timeout doesn't apply here.
-        region = os.environ.get("AWS_REGION", "us-east-1")
-        return BedrockConfig(region=region), None, None
-    # Anthropic-client providers (Vertex/Foundry) share one request timeout.
-    request_timeout = _parse_env_float("LLM_REQUEST_TIMEOUT_SECONDS", "120")
-    if provider == "vertex":
-        return (
-            None,
-            VertexConfig(
-                project=_require_env("ANTHROPIC_VERTEX_PROJECT_ID"),
-                region=os.environ.get("CLOUD_ML_REGION", "global"),
-                timeout=request_timeout,
-            ),
-            None,
-        )
-    if provider == "foundry":
-        return (
-            None,
-            None,
-            FoundryConfig(
-                resource=_require_env("ANTHROPIC_FOUNDRY_RESOURCE"),
-                timeout=request_timeout,
-            ),
-        )
-    raise ValueError(
-        f"LLM_PROVIDER={provider!r} is not supported "
-        f"(expected 'bedrock', 'vertex', or 'foundry')"
+def _load_bedrock_config() -> BedrockConfig:
+    # Bedrock's timeouts are handled by botocore (bounded by default), so the
+    # Anthropic-client request timeout doesn't apply here.
+    return BedrockConfig(region=os.environ.get("AWS_REGION", "us-east-1"))
+
+
+def _load_vertex_config() -> VertexConfig:
+    return VertexConfig(
+        project=_require_env("ANTHROPIC_VERTEX_PROJECT_ID"),
+        region=os.environ.get("CLOUD_ML_REGION", "global"),
+        # Anthropic-client providers (Vertex/Foundry) share one request timeout.
+        timeout=_parse_env_float("LLM_REQUEST_TIMEOUT_SECONDS", "120"),
     )
+
+
+def _load_foundry_config() -> FoundryConfig:
+    return FoundryConfig(
+        resource=_require_env("ANTHROPIC_FOUNDRY_RESOURCE"),
+        timeout=_parse_env_float("LLM_REQUEST_TIMEOUT_SECONDS", "120"),
+    )
+
+
+# provider name -> env-config loader. The single source of truth for the set of
+# supported providers on the config side; adding a provider is one row here plus
+# one row in providers/__init__._PROVIDER_ADAPTERS.
+_PROVIDER_CONFIG_LOADERS = {
+    "bedrock": _load_bedrock_config,
+    "vertex": _load_vertex_config,
+    "foundry": _load_foundry_config,
+}
+
+
+def _load_provider_config(provider: str) -> ProviderConfig:
+    loader = _PROVIDER_CONFIG_LOADERS.get(provider)
+    if loader is None:
+        supported = ", ".join(repr(p) for p in _PROVIDER_CONFIG_LOADERS)
+        raise ValueError(
+            f"LLM_PROVIDER={provider!r} is not supported (expected {supported})"
+        )
+    return loader()
 
 
 def load_config() -> ServiceConfig:
     provider = os.environ.get("LLM_PROVIDER", "bedrock")
-    bedrock, vertex, foundry = _load_provider_config(provider)
 
     return ServiceConfig(
         clickhouse=ClickHouseConfig(
@@ -136,13 +156,10 @@ def load_config() -> ServiceConfig:
             database=os.environ.get("CH_DATABASE", "default"),
             ca_cert=os.environ.get("CH_CA_CERT", ""),
         ),
-        provider=provider,
+        provider_config=_load_provider_config(provider),
         max_workers=_parse_env_int("MAX_WORKERS", "20"),
         retry_max_attempts=_parse_env_int("RETRY_MAX_ATTEMPTS", "5"),
         retry_max_backoff=_parse_env_int("RETRY_MAX_BACKOFF", "30"),
-        bedrock=bedrock,
-        vertex=vertex,
-        foundry=foundry,
         poll_interval=_parse_env_float("POLL_INTERVAL", "10"),
         pending_batch_limit=_parse_env_int("PENDING_BATCH_LIMIT", "100"),
         batch_page_size=_parse_env_int("BATCH_PAGE_SIZE", "100"),

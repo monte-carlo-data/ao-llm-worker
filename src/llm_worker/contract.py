@@ -86,14 +86,20 @@ def _normalize_tool(tool: dict) -> Tool:
     # v0 (Bedrock): {"toolSpec": {"name", "description", "inputSchema": {"json": schema}}}
     if "toolSpec" in tool:
         spec = tool["toolSpec"]
+        name = spec.get("name")
+        if not name:
+            raise ValueError("tool spec missing required 'name'")
         return Tool(
-            name=spec["name"],
+            name=name,
             description=spec.get("description", ""),
             input_schema=spec.get("inputSchema", {}).get("json", {}),
         )
     # v1 (flat): {"name", "description", "input_schema": schema}
+    name = tool.get("name")
+    if not name:
+        raise ValueError("tool spec missing required 'name'")
     return Tool(
-        name=tool["name"],
+        name=name,
         description=tool.get("description", ""),
         input_schema=tool.get("input_schema", {}),
     )
