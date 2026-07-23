@@ -170,15 +170,28 @@ def copyright_line(files: dict[str, str]) -> str:
 
 
 def extract(image: str) -> list[dict]:
-    proc = subprocess.run(
-        ["docker", "run", "-i", "--rm", image, "/app/.venv/bin/python", "-"],
-        input=CONTAINER_EXTRACTOR,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        proc = subprocess.run(
+            ["docker", "run", "-i", "--rm", image, "/app/.venv/bin/python", "-"],
+            input=CONTAINER_EXTRACTOR,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    except FileNotFoundError:
+        sys.exit("docker not found on PATH — is Docker installed and on PATH?")
+    except subprocess.TimeoutExpired:
+        sys.exit(f"docker extraction timed out after 300s for image {image!r}")
     if proc.returncode != 0:
         sys.exit(f"docker extraction failed:\n{proc.stderr}")
-    return sorted(json.loads(proc.stdout), key=lambda p: p["name"].lower())
+    try:
+        payload = json.loads(proc.stdout)
+    except json.JSONDecodeError as e:
+        sys.exit(
+            f"could not parse extractor output as JSON ({e}); "
+            f"first 500 chars of stdout:\n{proc.stdout[:500]}"
+        )
+    return sorted(payload, key=lambda p: p["name"].lower())
 
 
 def render_notice(cloud: str, packages: list[dict], has_uv: bool) -> str:
