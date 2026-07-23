@@ -28,7 +28,7 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "scripts"]
 addopts = ["-m", "not clickhouse and not vertex and not azure"]
 markers = [
     "clickhouse: tests that require a running ClickHouse container",
