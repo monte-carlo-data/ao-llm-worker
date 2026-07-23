@@ -151,6 +151,50 @@ class TestOutputEnvelopeGolden:
             == {"output_text": "", "tool_uses": [GOLDEN_TOOL_OUTPUT]}
         )
 
+    def test_multiple_tool_uses_accumulate_in_order(self, mocker):
+        # Exercises the accumulation loops in bedrock._extract_output and
+        # anthropic._to_llm_response across all three adapters — multi-tool
+        # extraction is otherwise unverified.
+        first, second = {"score": 0.9}, {"score": 0.1}
+
+        boto = mocker.Mock()
+        boto.converse.return_value = {
+            "output": {
+                "message": {
+                    "content": [
+                        {"toolUse": {"name": "evaluation_result", "input": first}},
+                        {"toolUse": {"name": "evaluation_result", "input": second}},
+                    ]
+                }
+            }
+        }
+        bedrock_env = _bedrock(boto).complete(GOLDEN_TOOL_REQUEST).output
+
+        vclient = mocker.Mock()
+        vclient.messages.create.return_value = _anthropic_response(
+            [
+                SimpleNamespace(type="tool_use", name="evaluation_result", input=first),
+                SimpleNamespace(type="tool_use", name="evaluation_result", input=second),
+            ]
+        )
+        vertex_env = _vertex(vclient).complete(GOLDEN_TOOL_REQUEST).output
+
+        fclient = mocker.Mock()
+        fclient.messages.create.return_value = _anthropic_response(
+            [
+                SimpleNamespace(type="tool_use", name="evaluation_result", input=first),
+                SimpleNamespace(type="tool_use", name="evaluation_result", input=second),
+            ]
+        )
+        foundry_env = _foundry(fclient).complete(GOLDEN_TOOL_REQUEST).output
+
+        assert (
+            bedrock_env
+            == vertex_env
+            == foundry_env
+            == {"output_text": "", "tool_uses": [first, second]}
+        )
+
     def test_empty_tool_output_envelope_parity(self, mocker):
         boto = mocker.Mock()
         boto.converse.return_value = {
