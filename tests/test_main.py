@@ -404,3 +404,21 @@ class TestRunStartup:
             mock_ch, ANY, mock_config.poll_interval
         )
         mock_service.run.assert_called_once()
+
+    def test_run_publishes_worker_info_on_success(self, mocker):
+        mock_config = mocker.MagicMock()
+        mocker.patch("llm_worker.main.load_config", return_value=mock_config)
+
+        mock_ch = mocker.MagicMock()
+        mocker.patch("llm_worker.main.ClickHouseClient", return_value=mock_ch)
+        mocker.patch("llm_worker.main.create_provider", return_value=mocker.MagicMock())
+        mock_service = mocker.MagicMock()
+        mocker.patch("llm_worker.main.LLMWorkerService", return_value=mock_service)
+
+        run()
+
+        # The consumer resolves the deployment's model pool from this marker, so
+        # swapped args or a hardcoded string would silently fall back to Bedrock.
+        mock_ch.write_worker_info.assert_called_once_with(
+            mock_config.cloud, mock_config.provider
+        )
