@@ -20,8 +20,10 @@ Usage:
     python scripts/gen_licenses.py --cloud aws --image montecarlodata/ao-llm-worker:0.0.0-latest-aws
     python scripts/gen_licenses.py --cloud gcp --image montecarlodata/ao-llm-worker:0.0.0-latest-gcp
 
-CI can run this against the freshly built image and `git diff --exit-code
-licensing/` to fail if the committed artifacts drift from what actually ships.
+CI runs this against the freshly built image, then `git add -A licensing/<cloud>`
+followed by `git diff --cached --quiet` to fail if the committed artifacts drift
+from what actually ships (the staged form also catches newly added, untracked
+files).
 """
 
 from __future__ import annotations
