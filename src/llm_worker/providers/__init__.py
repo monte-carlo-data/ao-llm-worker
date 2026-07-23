@@ -2,11 +2,11 @@
 
 `base` defines the provider interface; concrete adapters (e.g. `bedrock`,
 `vertex`) live alongside it. A single registry (`_PROVIDERS`) maps each
-`LLM_PROVIDER` name to its env-config loader and adapter factory; `load_config`
-consults it to build the provider config and `create_provider` to build the
-adapter. One registry means the config side and the adapter side can't drift out
-of sync, and factories are plain functions (statically checkable) rather than
-`importlib`/`getattr` on strings.
+`LLM_PROVIDER` name to its env-config loader and adapter factory; `load_provider_config`
+resolves the env-config and `create_provider` builds the adapter. One registry means
+the config side and the adapter side can't drift out of sync, and factories are plain
+functions (statically checkable) rather than `importlib`/`getattr` on strings. This
+module depends on `config` (never the reverse), so the layering stays one-directional.
 """
 
 from collections.abc import Callable
@@ -16,7 +16,6 @@ from llm_worker.config import (
     BedrockConfig,
     FoundryConfig,
     ProviderConfig,
-    ServiceConfig,
     VertexConfig,
     load_bedrock_config,
     load_foundry_config,
@@ -83,15 +82,14 @@ def load_provider_config(provider: str) -> ProviderConfig:
     return _get(provider).config_loader()
 
 
-def create_provider(config: ServiceConfig) -> LLMProvider:
-    """Build the provider adapter for ``config.provider_config``.
+def create_provider(provider_config: ProviderConfig) -> LLMProvider:
+    """Build the provider adapter for ``provider_config``.
 
     The adapter module is imported lazily inside its factory, so an image that
     ships only one provider's SDK never imports the others. A missing adapter/SDK
     surfaces as a clear startup error (e.g. running ``LLM_PROVIDER=vertex`` on the
     aws image variant) rather than an opaque ``ImportError``.
     """
-    provider_config = config.provider_config
     entry = _get(provider_config.provider)
     try:
         return entry.factory(provider_config)

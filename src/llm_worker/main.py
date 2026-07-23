@@ -1,6 +1,7 @@
 """Entry point and polling loop."""
 
 import logging
+import os
 import signal
 import time
 from collections.abc import Iterable
@@ -18,7 +19,7 @@ from tenacity import (
 from llm_worker.clickhouse import ClickHouseClient, LLMResult
 from llm_worker.config import load_config
 from llm_worker.executor import BatchExecutor
-from llm_worker.providers import create_provider
+from llm_worker.providers import create_provider, load_provider_config
 from llm_worker.logging_setup import configure_logging
 
 configure_logging()
@@ -193,12 +194,13 @@ class LLMWorkerService:
 
 def run():
     config = load_config()
+    provider_config = load_provider_config(os.environ.get("LLM_PROVIDER", "bedrock"))
     ch = ClickHouseClient(
         config.clickhouse,
         pending_batch_limit=config.pending_batch_limit,
         batch_page_size=config.batch_page_size,
     )
-    provider = create_provider(config)
+    provider = create_provider(provider_config)
     executor = BatchExecutor(
         provider,
         config.max_workers,
@@ -210,7 +212,7 @@ def run():
     # (e.g. the llm_worker_info table not yet migrated) must not stop batch
     # processing, so log and continue.
     try:
-        ch.write_worker_info(config.cloud, config.provider)
+        ch.write_worker_info(provider_config.cloud, provider_config.provider)
     except Exception as exc:  # noqa: BLE001 — best-effort metadata write must never block startup
         logger.warning("worker_info_write_failed", extra={"error": str(exc)})
 

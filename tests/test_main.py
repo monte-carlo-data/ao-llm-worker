@@ -384,6 +384,9 @@ class TestRunStartup:
     def test_run_survives_non_clickhouse_error_from_write_worker_info(self, mocker):
         mock_config = mocker.MagicMock()
         mocker.patch("llm_worker.main.load_config", return_value=mock_config)
+        mocker.patch(
+            "llm_worker.main.load_provider_config", return_value=mocker.MagicMock()
+        )
 
         mock_ch = mocker.MagicMock()
         mock_ch.write_worker_info.side_effect = RuntimeError("boom")
@@ -408,6 +411,10 @@ class TestRunStartup:
     def test_run_publishes_worker_info_on_success(self, mocker):
         mock_config = mocker.MagicMock()
         mocker.patch("llm_worker.main.load_config", return_value=mock_config)
+        mock_provider_config = mocker.MagicMock()
+        mocker.patch(
+            "llm_worker.main.load_provider_config", return_value=mock_provider_config
+        )
 
         mock_ch = mocker.MagicMock()
         mocker.patch("llm_worker.main.ClickHouseClient", return_value=mock_ch)
@@ -420,7 +427,7 @@ class TestRunStartup:
         # The consumer resolves the deployment's model pool from this marker, so
         # swapped args or a hardcoded string would silently fall back to Bedrock.
         mock_ch.write_worker_info.assert_called_once_with(
-            mock_config.cloud, mock_config.provider
+            mock_provider_config.cloud, mock_provider_config.provider
         )
 
 

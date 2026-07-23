@@ -54,23 +54,12 @@ ProviderConfig = BedrockConfig | VertexConfig | FoundryConfig
 @dataclass(frozen=True)
 class ServiceConfig:
     clickhouse: ClickHouseConfig
-    provider_config: ProviderConfig
     max_workers: int
     retry_max_attempts: int
     retry_max_backoff: int
     poll_interval: float
     pending_batch_limit: int
     batch_page_size: int
-
-    @property
-    def provider(self) -> str:
-        """LLM_PROVIDER name for this deployment (from the provider config's type)."""
-        return self.provider_config.provider
-
-    @property
-    def cloud(self) -> str:
-        """Cloud platform for this deployment (from the provider config's type)."""
-        return self.provider_config.cloud
 
 
 def _parse_env_int(name: str, default: str, *, min_val: int = 1) -> int:
@@ -128,12 +117,9 @@ def load_foundry_config() -> FoundryConfig:
 
 
 def load_config() -> ServiceConfig:
-    provider = os.environ.get("LLM_PROVIDER", "bedrock")
-    # Function-level import to avoid a config <-> providers module cycle: the
-    # provider registry lives in providers/, which imports this module's loaders
-    # and dataclasses at module load.
-    from llm_worker.providers import load_provider_config
-
+    # Provider-agnostic: config is a leaf module. The composition root (main.run)
+    # resolves the provider config and adapter via the providers registry, keeping
+    # the dependency one-directional (providers -> config).
     return ServiceConfig(
         clickhouse=ClickHouseConfig(
             host=os.environ.get("CH_HOST", "localhost"),
@@ -143,7 +129,6 @@ def load_config() -> ServiceConfig:
             database=os.environ.get("CH_DATABASE", "default"),
             ca_cert=os.environ.get("CH_CA_CERT", ""),
         ),
-        provider_config=load_provider_config(provider),
         max_workers=_parse_env_int("MAX_WORKERS", "20"),
         retry_max_attempts=_parse_env_int("RETRY_MAX_ATTEMPTS", "5"),
         retry_max_backoff=_parse_env_int("RETRY_MAX_BACKOFF", "30"),
