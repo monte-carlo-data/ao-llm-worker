@@ -18,16 +18,7 @@ commands:
       - run:
           name: Verify license artifacts match the built image
           command: |
-            python3 scripts/gen_licenses.py --cloud << parameters.cloud >> --image << parameters.image >>
-            git add -A licensing/<< parameters.cloud >>
-            if ! git diff --cached --quiet -- licensing/<< parameters.cloud >>; then
-              echo "ERROR: licensing/<< parameters.cloud >>/ is stale relative to the built image."
-              echo "Regenerate and commit:"
-              echo "  python scripts/gen_licenses.py --cloud << parameters.cloud >> --image <built-image>"
-              git --no-pager diff --cached -- licensing/<< parameters.cloud >>
-              exit 1
-            fi
-            echo "license artifacts for << parameters.cloud >> match the built image."
+            python3 scripts/gen_licenses.py --cloud << parameters.cloud >> --image << parameters.image >> --check
 
 jobs:
   lint:

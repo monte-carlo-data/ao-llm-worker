@@ -266,10 +266,64 @@ def render_notice(cloud: str, packages: list[dict], has_uv: bool) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def build_outputs(cloud: str, packages: list[dict], has_uv: bool) -> dict[str, str]:
+    """Every generated file for a cloud, keyed by path relative to
+    ``licensing/<cloud>/``: the NOTICE plus each package's bundled license files.
+
+    This is the single source of truth for the artifact set — both the writer
+    and the ``--check`` drift comparison derive from it.
+    """
+    outputs = {"NOTICE": render_notice(cloud, packages, has_uv)}
+    for pkg in packages:
+        cdir = canonical_dir(pkg["name"])
+        for rel, text in pkg["license_files"].items():
+            outputs[f"LICENSES/{cdir}/{rel}"] = text
+    return outputs
+
+
+def write_outputs(out_dir: Path, outputs: dict[str, str]) -> None:
+    """Write ``outputs`` under ``out_dir``, cleaning the LICENSES tree first so
+    removed deps don't linger."""
+    licenses_dir = out_dir / "LICENSES"
+    if licenses_dir.exists():
+        for child in sorted(licenses_dir.rglob("*"), reverse=True):
+            child.unlink() if (child.is_file() or child.is_symlink()) else child.rmdir()
+    for rel, text in outputs.items():
+        dest = out_dir / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(text, encoding="utf-8")
+
+
+def find_drift(out_dir: Path, outputs: dict[str, str]) -> list[str]:
+    """Committed paths under ``out_dir`` that don't match ``outputs`` — missing,
+    changed, or stale (committed but no longer generated). Empty means in sync."""
+    drift = []
+    for rel, text in sorted(outputs.items()):
+        dest = out_dir / rel
+        if not dest.exists():
+            drift.append(f"missing: {rel}")
+        elif dest.read_text(encoding="utf-8") != text:
+            drift.append(f"changed: {rel}")
+    on_disk = {"NOTICE"} if (out_dir / "NOTICE").exists() else set()
+    licenses_dir = out_dir / "LICENSES"
+    if licenses_dir.exists():
+        on_disk |= {
+            str(f.relative_to(out_dir)) for f in licenses_dir.rglob("*") if f.is_file()
+        }
+    drift += [f"stale: {rel}" for rel in sorted(on_disk - set(outputs))]
+    return drift
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--cloud", required=True, choices=["aws", "azure", "gcp"])
     ap.add_argument("--image", required=True, help="Built image ref to extract from")
+    ap.add_argument(
+        "--check",
+        action="store_true",
+        help="Verify the committed artifacts match the image without writing; "
+        "exit non-zero on drift (used by CI's drift gate).",
+    )
     args = ap.parse_args()
 
     packages = extract(args.image)
@@ -300,31 +354,28 @@ def main() -> None:
             + " — vet the license and extend LICENSE_FAMILIES."
         )
 
-    out_dir = REPO_ROOT / "licensing" / args.cloud
-    licenses_dir = out_dir / "LICENSES"
-    # Clean the LICENSES tree so removed deps don't linger.
-    if licenses_dir.exists():
-        for child in sorted(licenses_dir.rglob("*"), reverse=True):
-            child.unlink() if (child.is_file() or child.is_symlink()) else child.rmdir()
-    licenses_dir.mkdir(parents=True, exist_ok=True)
-
-    for pkg in packages:
-        pkg_dir = licenses_dir / canonical_dir(pkg["name"])
-        pkg_dir.mkdir(parents=True, exist_ok=True)
-        for rel, text in pkg["license_files"].items():
-            dest = pkg_dir / rel
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_text(text, encoding="utf-8")
-
     # uv ships as a copied binary (not a pip package), so it isn't in the venv
     # inventory. Its license lives at licensing/uv/ (shared, maintained by hand)
     # and the Dockerfile copies it into the image's LICENSES/ directly, so we only
     # note it in the NOTICE here — no duplication into the per-provider tree.
     has_uv = (REPO_ROOT / "licensing" / "uv").is_dir()
 
-    (out_dir / "NOTICE").write_text(
-        render_notice(args.cloud, packages, has_uv), encoding="utf-8"
-    )
+    out_dir = REPO_ROOT / "licensing" / args.cloud
+    outputs = build_outputs(args.cloud, packages, has_uv)
+
+    if args.check:
+        drift = find_drift(out_dir, outputs)
+        if drift:
+            sys.exit(
+                f"ERROR: licensing/{args.cloud}/ is stale relative to the built image.\n"
+                f"Regenerate and commit:\n"
+                f"  python scripts/gen_licenses.py --cloud {args.cloud} --image {args.image}\n"
+                + "\n".join(f"  {d}" for d in drift)
+            )
+        print(f"{args.cloud}: license artifacts match the built image.")
+        return
+
+    write_outputs(out_dir, outputs)
     print(
         f"{args.cloud}: {len(packages)} packages + {'uv' if has_uv else 'no uv'} -> {out_dir}"
     )
