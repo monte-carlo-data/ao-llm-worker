@@ -274,6 +274,17 @@ def main() -> None:
 
     packages = extract(args.image)
 
+    # Validate before touching the tree: a package with no bundled license must
+    # abort *before* we delete anything, so a failed run leaves the committed
+    # artifacts intact instead of a half-wiped tree.
+    missing = [p["name"] for p in packages if not p["license_files"]]
+    if missing:
+        sys.exit(
+            "ERROR: no bundled license file for: "
+            + ", ".join(sorted(missing))
+            + " — collect it manually."
+        )
+
     out_dir = REPO_ROOT / "licensing" / args.cloud
     licenses_dir = out_dir / "LICENSES"
     # Clean the LICENSES tree so removed deps don't linger.
@@ -283,10 +294,6 @@ def main() -> None:
     licenses_dir.mkdir(parents=True, exist_ok=True)
 
     for pkg in packages:
-        if not pkg["license_files"]:
-            sys.exit(
-                f"ERROR: {pkg['name']} ships no bundled license file — collect it manually."
-            )
         pkg_dir = licenses_dir / canonical_dir(pkg["name"])
         pkg_dir.mkdir(parents=True, exist_ok=True)
         for rel, text in pkg["license_files"].items():
