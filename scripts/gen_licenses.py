@@ -67,7 +67,7 @@ for d in im.distributions():
             # No try/except: a license file we can't read must abort loudly (the
             # container exits non-zero and extract() surfaces it) rather than
             # silently dropping attribution from the bundle.
-            files[rel] = d.locate_file(f).read_text(errors="replace")
+            files[rel] = d.locate_file(f).read_text(encoding="utf-8", errors="replace")
     out.append({
         "name": name,
         "version": md["Version"],
@@ -292,7 +292,7 @@ def main() -> None:
         for rel, text in pkg["license_files"].items():
             dest = pkg_dir / rel
             dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_text(text)
+            dest.write_text(text, encoding="utf-8")
 
     # uv ships as a copied binary (not a pip package), so it isn't in the venv
     # inventory. Its license lives at licensing/uv/ (shared, maintained by hand)
@@ -300,7 +300,9 @@ def main() -> None:
     # note it in the NOTICE here — no duplication into the per-provider tree.
     has_uv = (REPO_ROOT / "licensing" / "uv").is_dir()
 
-    (out_dir / "NOTICE").write_text(render_notice(args.cloud, packages, has_uv))
+    (out_dir / "NOTICE").write_text(
+        render_notice(args.cloud, packages, has_uv), encoding="utf-8"
+    )
     print(
         f"{args.cloud}: {len(packages)} packages + {'uv' if has_uv else 'no uv'} -> {out_dir}"
     )
