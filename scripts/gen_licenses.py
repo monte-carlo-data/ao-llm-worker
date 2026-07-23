@@ -62,10 +62,10 @@ for d in im.distributions():
         if rel.startswith("licenses/") or base.upper().startswith(
             ("LICENSE", "LICENCE", "COPYING", "NOTICE")
         ):
-            try:
-                files[base] = d.locate_file(f).read_text(errors="replace")
-            except Exception:
-                pass
+            # No try/except: a license file we can't read must abort loudly (the
+            # container exits non-zero and extract() surfaces it) rather than
+            # silently dropping attribution from the bundle.
+            files[base] = d.locate_file(f).read_text(errors="replace")
     out.append({
         "name": name,
         "version": md["Version"],
