@@ -102,13 +102,16 @@ def _require_env(name: str) -> str:
     return value
 
 
-def _load_bedrock_config() -> BedrockConfig:
+# Env-config loaders, one per provider. Referenced by the provider registry in
+# providers/__init__.py (the single source of truth for provider dispatch), which
+# maps each LLM_PROVIDER name to its loader and adapter factory.
+def load_bedrock_config() -> BedrockConfig:
     # Bedrock's timeouts are handled by botocore (bounded by default), so the
     # Anthropic-client request timeout doesn't apply here.
     return BedrockConfig(region=os.environ.get("AWS_REGION", "us-east-1"))
 
 
-def _load_vertex_config() -> VertexConfig:
+def load_vertex_config() -> VertexConfig:
     return VertexConfig(
         project=_require_env("ANTHROPIC_VERTEX_PROJECT_ID"),
         region=os.environ.get("CLOUD_ML_REGION", "global"),
@@ -117,35 +120,19 @@ def _load_vertex_config() -> VertexConfig:
     )
 
 
-def _load_foundry_config() -> FoundryConfig:
+def load_foundry_config() -> FoundryConfig:
     return FoundryConfig(
         resource=_require_env("ANTHROPIC_FOUNDRY_RESOURCE"),
         timeout=_parse_env_float("LLM_REQUEST_TIMEOUT_SECONDS", "120"),
     )
 
 
-# provider name -> env-config loader. The single source of truth for the set of
-# supported providers on the config side; adding a provider is one row here plus
-# one row in providers/__init__._PROVIDER_ADAPTERS.
-_PROVIDER_CONFIG_LOADERS = {
-    "bedrock": _load_bedrock_config,
-    "vertex": _load_vertex_config,
-    "foundry": _load_foundry_config,
-}
-
-
-def _load_provider_config(provider: str) -> ProviderConfig:
-    loader = _PROVIDER_CONFIG_LOADERS.get(provider)
-    if loader is None:
-        supported = ", ".join(repr(p) for p in _PROVIDER_CONFIG_LOADERS)
-        raise ValueError(
-            f"LLM_PROVIDER={provider!r} is not supported (expected {supported})"
-        )
-    return loader()
-
-
 def load_config() -> ServiceConfig:
     provider = os.environ.get("LLM_PROVIDER", "bedrock")
+    # Function-level import to avoid a config <-> providers module cycle: the
+    # provider registry lives in providers/, which imports this module's loaders
+    # and dataclasses at module load.
+    from llm_worker.providers import load_provider_config
 
     return ServiceConfig(
         clickhouse=ClickHouseConfig(
@@ -156,7 +143,7 @@ def load_config() -> ServiceConfig:
             database=os.environ.get("CH_DATABASE", "default"),
             ca_cert=os.environ.get("CH_CA_CERT", ""),
         ),
-        provider_config=_load_provider_config(provider),
+        provider_config=load_provider_config(provider),
         max_workers=_parse_env_int("MAX_WORKERS", "20"),
         retry_max_attempts=_parse_env_int("RETRY_MAX_ATTEMPTS", "5"),
         retry_max_backoff=_parse_env_int("RETRY_MAX_BACKOFF", "30"),
