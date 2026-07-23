@@ -29,11 +29,9 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src", "scripts"]
-addopts = ["-m", "not clickhouse and not vertex and not azure"]
+addopts = ["-m", "not clickhouse"]
 markers = [
     "clickhouse: tests that require a running ClickHouse container",
-    "vertex: tests that hit a live Vertex AI deployment (real credentials)",
-    "azure: tests that hit a live Microsoft Foundry deployment (real credentials)",
 ]
 
 [build-system]
