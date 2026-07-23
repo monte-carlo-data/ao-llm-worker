@@ -20,6 +20,32 @@ commands:
           command: |
             python3 scripts/gen_licenses.py --cloud << parameters.cloud >> --image << parameters.image >> --check
 
+  build-check-push:
+    description: >
+      Build the per-cloud image, verify its license artifacts, and push. Shared
+      by the tagged-release and dev-branch jobs, which differ only in how they
+      compute the version and floating tag.
+    parameters:
+      cloud:
+        type: string
+      version:
+        type: string
+      latest_tag:
+        type: string
+    steps:
+      - docker/check:
+          use-docker-credentials-store: true
+      - docker/build:
+          image: montecarlodata/ao-llm-worker
+          tag: << parameters.version >>-<< parameters.cloud >>,<< parameters.latest_tag >>-<< parameters.cloud >>
+          extra_build_args: --build-arg CLOUD=<< parameters.cloud >>
+      - license-drift-check:
+          cloud: << parameters.cloud >>
+          image: montecarlodata/ao-llm-worker:<< parameters.version >>-<< parameters.cloud >>
+      - docker/push:
+          image: montecarlodata/ao-llm-worker
+          tag: << parameters.version >>-<< parameters.cloud >>,<< parameters.latest_tag >>-<< parameters.cloud >>
+
 jobs:
   lint:
     docker:
@@ -74,18 +100,10 @@ jobs:
       - run:
           name: Extract version from tag
           command: echo "export VERSION_TAG=${CIRCLE_TAG#v}" >> "$BASH_ENV"
-      - docker/check:
-          use-docker-credentials-store: true
-      - docker/build:
-          image: montecarlodata/ao-llm-worker
-          tag: ${VERSION_TAG}-<< parameters.cloud >>,latest-<< parameters.cloud >>
-          extra_build_args: --build-arg CLOUD=<< parameters.cloud >>
-      - license-drift-check:
+      - build-check-push:
           cloud: << parameters.cloud >>
-          image: montecarlodata/ao-llm-worker:${VERSION_TAG}-<< parameters.cloud >>
-      - docker/push:
-          image: montecarlodata/ao-llm-worker
-          tag: ${VERSION_TAG}-<< parameters.cloud >>,latest-<< parameters.cloud >>
+          version: ${VERSION_TAG}
+          latest_tag: latest
 
   # Pre-release images from the dev branch, matching the AO helm chart's dev
   # scheme (0.0.0-dev.g<sha> per-commit + 0.0.0-latest floating), platform-suffixed.
@@ -100,18 +118,10 @@ jobs:
       - run:
           name: Compute dev version from commit
           command: echo "export DEV_VERSION=0.0.0-dev.g$(git rev-parse --short=7 HEAD)" >> "$BASH_ENV"
-      - docker/check:
-          use-docker-credentials-store: true
-      - docker/build:
-          image: montecarlodata/ao-llm-worker
-          tag: ${DEV_VERSION}-<< parameters.cloud >>,0.0.0-latest-<< parameters.cloud >>
-          extra_build_args: --build-arg CLOUD=<< parameters.cloud >>
-      - license-drift-check:
+      - build-check-push:
           cloud: << parameters.cloud >>
-          image: montecarlodata/ao-llm-worker:${DEV_VERSION}-<< parameters.cloud >>
-      - docker/push:
-          image: montecarlodata/ao-llm-worker
-          tag: ${DEV_VERSION}-<< parameters.cloud >>,0.0.0-latest-<< parameters.cloud >>
+          version: ${DEV_VERSION}
+          latest_tag: 0.0.0-latest
 
 workflows:
   build-and-deploy:
