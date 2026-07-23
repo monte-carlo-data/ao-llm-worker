@@ -29,7 +29,12 @@ from anthropic import (
 )
 
 from llm_worker.contract import ContractRequest, resolve_model_ref
-from llm_worker.providers.base import ErrorDisposition, LLMProvider, LLMResponse
+from llm_worker.providers.base import (
+    ErrorDisposition,
+    LLMProvider,
+    LLMResponse,
+    is_temperature_rejection_message,
+)
 
 
 class AnthropicMessagesProvider(LLMProvider):
@@ -63,18 +68,8 @@ class AnthropicMessagesProvider(LLMProvider):
         return ErrorDisposition.FAIL_ROW  # BadRequestError, NotFoundError, other
 
 
-_TEMPERATURE_REJECTION_KEYWORDS = ("not support", "unsupported", "deprecated")
-
-
 def _is_temperature_rejection(exc: BadRequestError) -> bool:
-    # Genuine rejections read like "temperature is deprecated for this
-    # model" or "model does not support temperature" — not range/format
-    # validation errors like "temperature must be between 0 and 1", which
-    # must propagate rather than being swallowed and retried.
-    message = str(exc).lower()
-    return "temperature" in message and any(
-        keyword in message for keyword in _TEMPERATURE_REJECTION_KEYWORDS
-    )
+    return is_temperature_rejection_message(str(exc))
 
 
 def _build_kwargs(

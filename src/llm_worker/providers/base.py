@@ -14,6 +14,25 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T")
 ExcT = TypeVar("ExcT", bound=BaseException)
 
+_TEMPERATURE_REJECTION_KEYWORDS = ("not support", "unsupported", "deprecated")
+
+
+def is_temperature_rejection_message(message: str) -> bool:
+    """True if a backend error message reads like a model rejecting a custom
+    temperature outright.
+
+    Genuine rejections read like "`temperature` is deprecated for this model" or
+    "model does not support temperature" — as opposed to range/format validation
+    errors like "temperature must be between 0.0 and 1.0", which must propagate
+    rather than being swallowed and retried without temperature. Shared by every
+    adapter so the keyword list can't diverge between clouds; each adapter only
+    supplies how to extract the message string from its native exception.
+    """
+    low = message.lower()
+    return "temperature" in low and any(
+        keyword in low for keyword in _TEMPERATURE_REJECTION_KEYWORDS
+    )
+
 
 @dataclass
 class LLMResponse:

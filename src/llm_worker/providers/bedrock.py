@@ -17,7 +17,12 @@ from botocore.exceptions import (
 
 from llm_worker.config import BedrockConfig
 from llm_worker.contract import ContractRequest, resolve_model_ref
-from llm_worker.providers.base import ErrorDisposition, LLMProvider, LLMResponse
+from llm_worker.providers.base import (
+    ErrorDisposition,
+    LLMProvider,
+    LLMResponse,
+    is_temperature_rejection_message,
+)
 
 NON_RETRYABLE_ERROR_CODES = {
     "AccessDeniedException",
@@ -86,21 +91,11 @@ class BedrockProvider(LLMProvider):
         return ErrorDisposition.FAIL_ROW
 
 
-_TEMPERATURE_REJECTION_KEYWORDS = ("not support", "unsupported", "deprecated")
-
-
 def _is_temperature_rejection(exc: ClientError) -> bool:
     error = exc.response.get("Error", {})
     if error.get("Code") != "ValidationException":
         return False
-    message = str(error.get("Message", "")).lower()
-    # Genuine rejections read like "`temperature` is deprecated for this
-    # model" or "model does not support temperature" — not range/format
-    # validation errors like "temperature must be between 0.0 and 1.0", which
-    # must propagate rather than being swallowed and retried.
-    return "temperature" in message and any(
-        keyword in message for keyword in _TEMPERATURE_REJECTION_KEYWORDS
-    )
+    return is_temperature_rejection_message(str(error.get("Message", "")))
 
 
 def _build_converse_kwargs(
