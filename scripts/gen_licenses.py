@@ -322,6 +322,34 @@ def find_drift(out_dir: Path, outputs: dict[str, str]) -> list[str]:
     return drift
 
 
+def check_licenses_present(packages: list[dict]) -> None:
+    """Abort if any package ships no bundled license file. Called before any tree
+    mutation so a failed run leaves the committed artifacts intact."""
+    missing = [p["name"] for p in packages if not p["license_files"]]
+    if missing:
+        sys.exit(
+            "ERROR: no bundled license file for: "
+            + ", ".join(sorted(missing))
+            + " — collect it manually."
+        )
+
+
+def check_license_families_recognized(packages: list[dict]) -> None:
+    """Fail closed on an unrecognized license family, so an unvetted (possibly
+    copyleft) license can't ship silently in the Other-licenses bucket."""
+    unrecognized = [
+        p["name"]
+        for p in packages
+        if license_family(declared_license(p)) == OTHER_LICENSES
+    ]
+    if unrecognized:
+        sys.exit(
+            "ERROR: unrecognized license family for: "
+            + ", ".join(sorted(unrecognized))
+            + " — vet the license and extend LICENSE_FAMILIES."
+        )
+
+
 def uv_license_present() -> bool:
     """True if ``licensing/uv/`` ships the dual-license files the NOTICE references.
 
@@ -356,31 +384,10 @@ def main() -> None:
 
     packages = extract(args.image)
 
-    # Validate before touching the tree: a package with no bundled license must
-    # abort *before* we delete anything, so a failed run leaves the committed
+    # Validate before touching the tree, so a failed run leaves the committed
     # artifacts intact instead of a half-wiped tree.
-    missing = [p["name"] for p in packages if not p["license_files"]]
-    if missing:
-        sys.exit(
-            "ERROR: no bundled license file for: "
-            + ", ".join(sorted(missing))
-            + " — collect it manually."
-        )
-
-    # Fail closed on an unrecognized license family: a dependency whose license we
-    # haven't classified must be vetted by a human before it ships, not silently
-    # bucketed into "Other licenses".
-    unrecognized = [
-        p["name"]
-        for p in packages
-        if license_family(declared_license(p)) == OTHER_LICENSES
-    ]
-    if unrecognized:
-        sys.exit(
-            "ERROR: unrecognized license family for: "
-            + ", ".join(sorted(unrecognized))
-            + " — vet the license and extend LICENSE_FAMILIES."
-        )
+    check_licenses_present(packages)
+    check_license_families_recognized(packages)
 
     # uv ships as a copied binary (not a pip package), so it isn't in the venv
     # inventory. Its license lives at licensing/uv/ (shared, maintained by hand)

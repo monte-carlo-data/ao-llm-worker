@@ -235,3 +235,55 @@ class TestUvLicensePresent:
         (uv / "LICENSE-APACHE").write_text("a")  # LICENSE-MIT missing
         with pytest.raises(SystemExit):
             gl.uv_license_present()
+
+
+class TestFailClosedGates:
+    def test_licenses_present_passes_when_all_have_a_license(self):
+        gl.check_licenses_present([_pkg(license_files={"LICENSE": "x"})])  # no raise
+
+    def test_missing_license_fails_closed(self):
+        with pytest.raises(SystemExit):
+            gl.check_licenses_present([_pkg(name="nolicense", license_files={})])
+
+    def test_recognized_family_passes(self):
+        gl.check_license_families_recognized([_pkg(license_expression="MIT")])  # no raise
+
+    def test_unrecognized_family_fails_closed(self):
+        pkg = _pkg(name="weird", license_expression="Weird Proprietary EULA")
+        with pytest.raises(SystemExit):
+            gl.check_license_families_recognized([pkg])
+
+
+class _Proc:
+    def __init__(self, returncode, stdout, stderr=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+class TestExtractErrorPaths:
+    def test_docker_missing_exits(self, monkeypatch):
+        def _raise(*a, **k):
+            raise FileNotFoundError()
+
+        monkeypatch.setattr(gl.subprocess, "run", _raise)
+        with pytest.raises(SystemExit):
+            gl.extract("img")
+
+    def test_timeout_exits(self, monkeypatch):
+        def _raise(*a, **k):
+            raise gl.subprocess.TimeoutExpired(cmd="docker", timeout=1)
+
+        monkeypatch.setattr(gl.subprocess, "run", _raise)
+        with pytest.raises(SystemExit):
+            gl.extract("img")
+
+    def test_nonzero_returncode_exits(self, monkeypatch):
+        monkeypatch.setattr(gl.subprocess, "run", lambda *a, **k: _Proc(1, "", "boom"))
+        with pytest.raises(SystemExit):
+            gl.extract("img")
+
+    def test_unparseable_json_exits(self, monkeypatch):
+        monkeypatch.setattr(gl.subprocess, "run", lambda *a, **k: _Proc(0, "not json"))
+        with pytest.raises(SystemExit):
+            gl.extract("img")
