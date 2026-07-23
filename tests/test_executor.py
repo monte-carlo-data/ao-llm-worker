@@ -105,9 +105,9 @@ class TestInvoke:
 
     def test_malformed_tool_config_fails_row_not_loop(self):
         # Valid JSON, but the toolSpec is missing its required "name" key.
-        # build_request -> _normalize_tools -> _normalize_tool does unguarded
-        # `spec["name"]` access, which raises an uncaught KeyError that must
-        # not escape invoke() -- the row should come back failed instead.
+        # build_request -> _normalize_tools -> _normalize_tool raises ValueError
+        # via spec.get("name"); that must not escape invoke() -- the row should
+        # come back failed instead.
         provider = FakeProvider()
         tool_config = json.dumps({"tools": [{"toolSpec": {"description": "x"}}]})
 
