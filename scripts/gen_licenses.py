@@ -1,0 +1,420 @@
+#!/usr/bin/env python3
+"""Generate per-cloud-platform NOTICE + LICENSES/ from a built worker image.
+
+The authoritative dependency set (linux platform wheels + full transitive
+closure) exists only inside the built image, not in a local dev venv, so this
+extracts license artifacts directly from a container. Every wheel we ship
+bundles its license text under `*.dist-info/licenses/`, so no manual upstream
+fetching is needed.
+
+For each cloud-platform variant it writes:
+    licensing/<cloud>/NOTICE
+    licensing/<cloud>/LICENSES/<package>/<license files>
+
+The `uv` binary is copied into the image from the astral-sh/uv stage (not a pip
+package), so it never appears in the venv inventory. Its license lives at
+licensing/uv/ (maintained by hand) and the Dockerfile copies it into the image
+directly; this script only records it in the generated NOTICE.
+
+Usage:
+    python scripts/gen_licenses.py --cloud aws --image montecarlodata/ao-llm-worker:0.0.0-latest-aws
+    python scripts/gen_licenses.py --cloud gcp --image montecarlodata/ao-llm-worker:0.0.0-latest-gcp
+    # verify committed artifacts match the image without writing (used by CI):
+    python scripts/gen_licenses.py --cloud aws --image <ref> --check
+
+CI runs this with --check against the freshly built image: it regenerates the
+NOTICE + LICENSES/ in memory and compares them to what's committed, failing on
+any missing, changed, or stale file (see find_drift) — so a dependency change
+can't ship without its license artifacts being updated.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+from urllib.parse import urlparse
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# Runs inside the container against its venv interpreter. Prints one JSON blob:
+# a list of {name, version, license fields, license_files: {relpath: text}}.
+CONTAINER_EXTRACTOR = r"""
+import importlib.metadata as im
+import json
+
+out = []
+for d in im.distributions():
+    md = d.metadata
+    name = md["Name"]
+    if name == "llm-worker":
+        continue  # our own project
+    files = {}
+    for f in (d.files or []):
+        s = str(f).replace("\\", "/")
+        if ".dist-info/" not in s:
+            continue
+        rel = s.split(".dist-info/", 1)[1]  # "licenses/LICENSE", "LICENSE", "METADATA", ...
+        base = rel.rsplit("/", 1)[-1]
+        # PEP 639 puts license files under licenses/; older wheels drop LICENSE-ish
+        # files in the dist-info root. Take both, keyed by their full path under
+        # dist-info so two files sharing a basename (e.g. a top-level LICENSE and a
+        # nested licenses/LICENSE) can't collide and overwrite one another.
+        if rel.startswith("licenses/") or base.upper().startswith(
+            ("LICENSE", "LICENCE", "COPYING", "NOTICE")
+        ):
+            # No try/except: a license file we can't read must abort loudly (the
+            # container exits non-zero and extract() surfaces it) rather than
+            # silently dropping attribution from the bundle.
+            files[rel] = d.locate_file(f).read_text(encoding="utf-8", errors="replace")
+    out.append({
+        "name": name,
+        "version": md["Version"],
+        "license_expression": md.get("License-Expression") or "",
+        "classifiers": [c for c in (md.get_all("Classifier") or []) if c.startswith("License")],
+        "license_field": (md.get("License") or "").strip()[:80],
+        "home_page": md.get("Home-page") or "",
+        "project_urls": md.get_all("Project-URL") or [],
+        "license_files": files,
+    })
+print(json.dumps(out))
+"""
+
+# Fallback family for a declared license we don't recognize. A magic string with
+# control-flow meaning — returned by license_family(), grouped on by render_notice(),
+# and equality-tested by the fail-closed gate in main() — so it lives in one place;
+# renaming the label here keeps the gate wired.
+OTHER_LICENSES = "Other licenses"
+
+# Normalized license family for NOTICE grouping. Order matters: the first
+# family whose token appears in the declared license wins the grouping (a
+# package's full declared expression is still shown next to it).
+LICENSE_FAMILIES = [
+    ("Apache License, Version 2.0", ("apache",)),
+    ("Mozilla Public License 2.0", ("mpl", "mozilla")),
+    ("Python Software Foundation License", ("psf", "python software foundation")),
+    ("BSD License", ("bsd",)),
+    ("MIT License", ("mit",)),
+]
+
+
+def canonical_dir(name: str) -> str:
+    """PEP 503-ish normalized directory name (lowercase, single hyphens)."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def declared_license(pkg: dict) -> str:
+    if pkg["license_expression"]:
+        return pkg["license_expression"]
+    classifiers = [c.split("::")[-1].strip() for c in pkg["classifiers"]]
+    if classifiers:
+        return ", ".join(classifiers)
+    return pkg["license_field"] or "See bundled license"
+
+
+def license_family(declared: str) -> str:
+    low = declared.lower()
+    for family, tokens in LICENSE_FAMILIES:
+        # Word-boundary match so a short token like "mit" doesn't fire inside an
+        # unrelated word ("permitted", "transmit") in a free-text license field.
+        if any(re.search(rf"\b{re.escape(t)}\b", low) for t in tokens):
+            return family
+    return OTHER_LICENSES
+
+
+def best_url(pkg: dict) -> str:
+    if pkg["home_page"]:
+        return pkg["home_page"]
+    urls = {}
+    for entry in pkg["project_urls"]:
+        label, _, url = entry.partition(",")
+        urls[label.strip().lower()] = url.strip()
+    for key in ("homepage", "home", "repository", "source", "source code", "code"):
+        if key in urls:
+            return urls[key]
+    # Prefer a repo URL over changelog/release/docs pages that other keys point to.
+    # Match on the parsed hostname (not a substring) so a github.com/gitlab.com in a
+    # path or a look-alike host can't masquerade as the repo URL.
+    for url in urls.values():
+        if (urlparse(url).hostname or "").lower() in ("github.com", "gitlab.com"):
+            return re.sub(r"/(blob|releases|tree)/.*$", "", url)
+    return next(iter(urls.values()), "")
+
+
+# Fragments of the verbatim Apache-2.0 license body that start with "copyright"
+# but are boilerplate, not a real attribution.
+_COPYRIGHT_NOISE = (
+    "[yyyy]",
+    "[name of copyright owner]",
+    "that is included in or attached",
+    "copyright notice",
+    "copyright, patent",
+    "copyright ownership",
+)
+
+
+def copyright_line(files: dict[str, str]) -> str:
+    """Best-effort copyright attribution from the bundled texts.
+
+    Apache-licensed projects carry real attribution in their NOTICE file (the
+    LICENSE is the verbatim Apache body), so scan NOTICE files first, and only
+    accept a line carrying a real signal — a year, "(c)", or "©".
+    """
+    ordered = sorted(
+        files.items(), key=lambda kv: 0 if "NOTICE" in kv[0].upper() else 1
+    )
+    for _, text in ordered:
+        for raw in text.splitlines():
+            line = raw.strip().rstrip(",")
+            low = line.lower()
+            if not low.startswith("copyright") or any(
+                n in low for n in _COPYRIGHT_NOISE
+            ):
+                continue
+            if re.search(r"\b\d{4}\b", line) or "(c)" in low or "©" in line:
+                return line
+    return ""
+
+
+def extract(image: str) -> list[dict]:
+    try:
+        proc = subprocess.run(
+            ["docker", "run", "-i", "--rm", image, "/app/.venv/bin/python", "-"],
+            input=CONTAINER_EXTRACTOR,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    except FileNotFoundError:
+        sys.exit("docker not found on PATH — is Docker installed and on PATH?")
+    except subprocess.TimeoutExpired:
+        sys.exit(f"docker extraction timed out after 300s for image {image!r}")
+    if proc.returncode != 0:
+        sys.exit(f"docker extraction failed:\n{proc.stderr}")
+    try:
+        payload = json.loads(proc.stdout)
+    except json.JSONDecodeError as e:
+        sys.exit(
+            f"could not parse extractor output as JSON ({e}); "
+            f"first 500 chars of stdout:\n{proc.stdout[:500]}"
+        )
+    return sorted(payload, key=lambda p: p["name"].lower())
+
+
+def render_notice(cloud: str, packages: list[dict], has_uv: bool) -> str:
+    groups: dict[str, list[dict]] = {}
+    for pkg in packages:
+        groups.setdefault(license_family(declared_license(pkg)), []).append(pkg)
+
+    lines = [
+        "NOTICE",
+        "======",
+        "",
+        "ao-llm-worker",
+        "Copyright 2026 Monte Carlo AI, Inc.",
+        "",
+        "This product includes software developed at Monte Carlo AI, Inc.",
+        "(https://montecarlo.ai).",
+        "",
+        "-" * 80,
+        f"Third-party components ({cloud} image variant)",
+        "-" * 80,
+        "",
+        "The ao-llm-worker container image bundles the following third-party",
+        "components. Each is installed unmodified into the application virtual",
+        "environment (/app/.venv) of the distributed image. A verbatim copy of each",
+        "component's license is provided under the LICENSES/ directory distributed",
+        "alongside this NOTICE (LICENSES/<project>/, mounted at /app/LICENSES in the",
+        "image). Where an upstream project ships its own NOTICE file, that file is",
+        "reproduced verbatim at LICENSES/<project>/NOTICE and its attribution notices",
+        "are incorporated here by reference, as required by Apache License 2.0",
+        "section 4(d).",
+        "",
+        "This file is generated by scripts/gen_licenses.py from the built image; the",
+        "exact versions bundled in any given release are recorded in uv.lock.",
+        "",
+    ]
+
+    for family, _ in LICENSE_FAMILIES + [(OTHER_LICENSES, ())]:
+        pkgs = groups.get(family)
+        if not pkgs:
+            continue
+        lines.append(family)
+        for i, pkg in enumerate(sorted(pkgs, key=lambda p: p["name"].lower()), 1):
+            cdir = canonical_dir(pkg["name"])
+            declared = declared_license(pkg)
+            cr = copyright_line(pkg["license_files"])
+            url = best_url(pkg)
+            artifacts = ", ".join(
+                f"LICENSES/{cdir}/{f}" for f in sorted(pkg["license_files"])
+            )
+            head = f"  {i:>2}. {pkg['name']} {pkg['version']}"
+            if declared not in family:
+                head += f"  [{declared}]"
+            lines.append(head)
+            if cr:
+                lines.append(f"      {cr}")
+            if url:
+                lines.append(f"      {url}")
+            if artifacts:
+                lines.append(f"      {artifacts}")
+        lines.append("")
+
+    if has_uv:
+        lines += [
+            "Build tooling",
+            "  uv (the Python package installer) is copied into the image from the",
+            "  astral-sh/uv distribution and is dual-licensed Apache-2.0 OR MIT.",
+            "  LICENSES/uv/LICENSE-APACHE, LICENSES/uv/LICENSE-MIT",
+            "",
+        ]
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def build_outputs(cloud: str, packages: list[dict], has_uv: bool) -> dict[str, str]:
+    """Every generated file for a cloud, keyed by path relative to
+    ``licensing/<cloud>/``: the NOTICE plus each package's bundled license files.
+
+    This is the single source of truth for the artifact set — both the writer
+    and the ``--check`` drift comparison derive from it.
+    """
+    outputs = {"NOTICE": render_notice(cloud, packages, has_uv)}
+    for pkg in packages:
+        cdir = canonical_dir(pkg["name"])
+        for rel, text in pkg["license_files"].items():
+            outputs[f"LICENSES/{cdir}/{rel}"] = text
+    return outputs
+
+
+def write_outputs(out_dir: Path, outputs: dict[str, str]) -> None:
+    """Write ``outputs`` under ``out_dir``, cleaning the LICENSES tree first so
+    removed deps don't linger."""
+    licenses_dir = out_dir / "LICENSES"
+    if licenses_dir.exists():
+        for child in sorted(licenses_dir.rglob("*"), reverse=True):
+            child.unlink() if (child.is_file() or child.is_symlink()) else child.rmdir()
+    for rel, text in outputs.items():
+        dest = out_dir / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(text, encoding="utf-8")
+
+
+def find_drift(out_dir: Path, outputs: dict[str, str]) -> list[str]:
+    """Committed paths under ``out_dir`` that don't match ``outputs`` — missing,
+    changed, or stale (committed but no longer generated). Empty means in sync."""
+    drift = []
+    for rel, text in sorted(outputs.items()):
+        dest = out_dir / rel
+        if not dest.exists():
+            drift.append(f"missing: {rel}")
+        elif dest.read_text(encoding="utf-8") != text:
+            drift.append(f"changed: {rel}")
+    on_disk = {"NOTICE"} if (out_dir / "NOTICE").exists() else set()
+    licenses_dir = out_dir / "LICENSES"
+    if licenses_dir.exists():
+        on_disk |= {
+            str(f.relative_to(out_dir)) for f in licenses_dir.rglob("*") if f.is_file()
+        }
+    drift += [f"stale: {rel}" for rel in sorted(on_disk - set(outputs))]
+    return drift
+
+
+def check_licenses_present(packages: list[dict]) -> None:
+    """Abort if any package ships no bundled license file. Called before any tree
+    mutation so a failed run leaves the committed artifacts intact."""
+    missing = [p["name"] for p in packages if not p["license_files"]]
+    if missing:
+        sys.exit(
+            "ERROR: no bundled license file for: "
+            + ", ".join(sorted(missing))
+            + " — collect it manually."
+        )
+
+
+def check_license_families_recognized(packages: list[dict]) -> None:
+    """Fail closed on an unrecognized license family, so an unvetted (possibly
+    copyleft) license can't ship silently in the Other-licenses bucket."""
+    unrecognized = [
+        p["name"]
+        for p in packages
+        if license_family(declared_license(p)) == OTHER_LICENSES
+    ]
+    if unrecognized:
+        sys.exit(
+            "ERROR: unrecognized license family for: "
+            + ", ".join(sorted(unrecognized))
+            + " — vet the license and extend LICENSE_FAMILIES."
+        )
+
+
+def uv_license_present() -> bool:
+    """True if ``licensing/uv/`` ships the dual-license files the NOTICE references.
+
+    ``render_notice`` cites ``LICENSE-APACHE`` + ``LICENSE-MIT`` whenever the
+    directory exists, so a present-but-partial directory would yield a NOTICE
+    citing files the image doesn't ship — fail loudly instead, consistent with the
+    other fail-closed gates.
+    """
+    uv_dir = REPO_ROOT / "licensing" / "uv"
+    if not uv_dir.is_dir():
+        return False
+    missing = [n for n in ("LICENSE-APACHE", "LICENSE-MIT") if not (uv_dir / n).is_file()]
+    if missing:
+        sys.exit(
+            f"ERROR: licensing/uv/ is missing {', '.join(sorted(missing))} — the "
+            "generated NOTICE references these files."
+        )
+    return True
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--cloud", required=True, choices=["aws", "azure", "gcp"])
+    ap.add_argument("--image", required=True, help="Built image ref to extract from")
+    ap.add_argument(
+        "--check",
+        action="store_true",
+        help="Verify the committed artifacts match the image without writing; "
+        "exit non-zero on drift (used by CI's drift gate).",
+    )
+    args = ap.parse_args()
+
+    packages = extract(args.image)
+
+    # Validate before touching the tree, so a failed run leaves the committed
+    # artifacts intact instead of a half-wiped tree.
+    check_licenses_present(packages)
+    check_license_families_recognized(packages)
+
+    # uv ships as a copied binary (not a pip package), so it isn't in the venv
+    # inventory. Its license lives at licensing/uv/ (shared, maintained by hand)
+    # and the Dockerfile copies it into the image's LICENSES/ directly, so we only
+    # note it in the NOTICE here — no duplication into the per-provider tree.
+    has_uv = uv_license_present()
+
+    out_dir = REPO_ROOT / "licensing" / args.cloud
+    outputs = build_outputs(args.cloud, packages, has_uv)
+
+    if args.check:
+        drift = find_drift(out_dir, outputs)
+        if drift:
+            sys.exit(
+                f"ERROR: licensing/{args.cloud}/ is stale relative to the built image.\n"
+                f"Regenerate and commit:\n"
+                f"  python scripts/gen_licenses.py --cloud {args.cloud} --image {args.image}\n"
+                + "\n".join(f"  {d}" for d in drift)
+            )
+        print(f"{args.cloud}: license artifacts match the built image.")
+        return
+
+    write_outputs(out_dir, outputs)
+    print(
+        f"{args.cloud}: {len(packages)} packages + {'uv' if has_uv else 'no uv'} -> {out_dir}"
+    )
+
+
+if __name__ == "__main__":
+    main()

@@ -1,14 +1,22 @@
 [project]
 name = "llm-worker"
 version = "0.1.0"
-description = "Service that polls ClickHouse for LLM evaluation inputs, calls Bedrock, and writes results back"
+description = "Service that polls ClickHouse for LLM evaluation inputs, calls the configured LLM provider, and writes results back"
 requires-python = ">=3.14"
 scripts = { llm-worker = "llm_worker.main:run" }
 dependencies = [
-    "boto3>=1.42.0",
     "clickhouse-connect>=0.8.0",
     "tenacity>=9.0.0",
 ]
+
+[project.optional-dependencies]
+# Keyed by cloud platform (the image variant), not the LLM backend: aws ships
+# the Bedrock SDK, gcp the Anthropic Vertex SDK, azure the Anthropic + Azure
+# identity SDKs. The runtime backend is selected separately via LLM_PROVIDER
+# (aws->bedrock, gcp->vertex, azure->foundry).
+aws = ["boto3>=1.42.0"]
+gcp = ["anthropic[vertex]>=0.40.0"]
+azure = ["anthropic>=0.116.0", "azure-identity>=1.19.0"]
 
 [dependency-groups]
 dev = [
@@ -20,7 +28,7 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "scripts"]
 addopts = ["-m", "not clickhouse"]
 markers = [
     "clickhouse: tests that require a running ClickHouse container",

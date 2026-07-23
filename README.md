@@ -1,7 +1,8 @@
 # llm-worker
 
-Polling service that reads LLM evaluation batches from ClickHouse, calls
-AWS Bedrock Converse API in parallel, and writes results back.
+Polling service that reads LLM evaluation batches from ClickHouse, invokes the
+configured LLM provider (AWS Bedrock, Vertex AI, or Microsoft Foundry) in
+parallel, and writes results back.
 
 ## How it works
 
@@ -9,14 +10,21 @@ The worker runs a continuous loop:
 
 1. **Poll** -- query ClickHouse for batches in `pending` status.
 2. **Process** -- for each batch, fetch unprocessed input rows in pages and
-   invoke Bedrock Converse in parallel (`ThreadPoolExecutor`, default 20 workers).
+   invoke the configured LLM provider in parallel (`ThreadPoolExecutor`, `MAX_WORKERS`).
 3. **Write** -- stream results back to ClickHouse in chunks of 50 rows, then
    mark the batch `complete`.
 
 Reads are idempotent: rows already in `llm_results` are skipped, so the worker
-can safely recover from crashes mid-batch. An `AccessDeniedException` from
-Bedrock triggers a batch-level abort to avoid burning retries on every remaining
+can safely recover from crashes mid-batch. An auth/permission failure from the
+provider triggers a batch-level abort to avoid burning retries on every remaining
 row.
+
+On startup the worker publishes its `(cloud, provider)` to the
+`otel_traces.llm_worker_info` table. This is a **cross-service contract**: the
+monolith reads that marker to resolve which cloud-native Claude model pool a
+deployment uses (`aws`→bedrock, `gcp`→vertex, `azure`→foundry) when a batch's
+rows carry no explicit model. The write is best-effort — a failure is logged and
+never blocks batch processing.
 
 ## Quick start
 
@@ -24,7 +32,8 @@ row.
 # install
 uv sync
 
-# run (needs CH + AWS credentials)
+# run (needs ClickHouse + the selected provider's credentials —
+# see the LLM provider section under Configuration)
 uv run llm-worker
 ```
 
@@ -42,14 +51,43 @@ All settings come from environment variables.
 | `CH_PASSWORD`  | *(empty)*   | ClickHouse password       |
 | `CH_DATABASE`  | `default`   | ClickHouse database       |
 
-### Bedrock
+### LLM provider
 
-| Variable              | Default     | Description                               |
-| --------------------- | ----------- | ----------------------------------------- |
-| `AWS_REGION`          | `us-east-1` | AWS region for Bedrock                    |
-| `MAX_WORKERS`         | `20`        | Concurrent Bedrock calls                  |
-| `RETRY_MAX_ATTEMPTS`  | `5`         | Max retries per Bedrock call              |
-| `RETRY_MAX_BACKOFF`   | `30`        | Max backoff in seconds between retries    |
+The worker talks to one LLM backend per deployment, selected by `LLM_PROVIDER`.
+Each cloud ships as its own image variant (built with `--build-arg CLOUD=<aws|gcp|azure>`),
+carrying only that backend's SDK.
+
+| Variable             | Default   | Description                                                  |
+| -------------------- | --------- | ------------------------------------------------------------ |
+| `LLM_PROVIDER`       | `bedrock` | `bedrock` (AWS), `vertex` (GCP), or `foundry` (Azure)        |
+| `MAX_WORKERS`        | `20`      | Concurrent provider calls                                    |
+| `RETRY_MAX_ATTEMPTS` | `5`       | Max retries per call                                         |
+| `RETRY_MAX_BACKOFF`  | `30`      | Max backoff in seconds between retries                       |
+
+Provider-specific settings — only the selected provider's vars are read:
+
+**`bedrock`** (aws image) — auth via the pod's AWS credentials (IRSA):
+
+| Variable     | Default     | Description            |
+| ------------ | ----------- | ---------------------- |
+| `AWS_REGION` | `us-east-1` | AWS region for Bedrock |
+
+**`vertex`** (gcp image) — Claude on Vertex AI, auth via GKE Workload Identity (ADC, no key):
+
+| Variable                      | Default  | Description                                             |
+| ----------------------------- | -------- | -------------------------------------------------------- |
+| `ANTHROPIC_VERTEX_PROJECT_ID` | —        | GCP project id                                          |
+| `CLOUD_ML_REGION`             | `global` | Vertex region                                           |
+| `LLM_REQUEST_TIMEOUT_SECONDS` | `120`    | Per-request timeout (seconds) for the Anthropic client  |
+
+Model selection is per-request via each input row's `model_id`, not env-configured.
+
+**`foundry`** (azure image) — Claude on Microsoft Foundry, auth via Entra ID (`DefaultAzureCredential`, no static secret):
+
+| Variable                      | Default | Description                                             |
+| ----------------------------- | ------- | -------------------------------------------------------- |
+| `ANTHROPIC_FOUNDRY_RESOURCE`  | —       | Microsoft Foundry resource name                         |
+| `LLM_REQUEST_TIMEOUT_SECONDS` | `120`   | Per-request timeout (seconds) for the Anthropic client  |
 
 ### Service
 
@@ -79,17 +117,29 @@ uv run pyright src/
 
 ## Docker
 
+Each image variant bundles one cloud's LLM SDK; select it with `--build-arg CLOUD`:
+
 ```bash
-docker build -t llm-worker .
-docker run -e CH_HOST=clickhouse -e AWS_REGION=us-east-1 llm-worker
+docker build --build-arg CLOUD=aws -t llm-worker:aws .
+docker run -e CH_HOST=clickhouse -e LLM_PROVIDER=bedrock -e AWS_REGION=us-east-1 llm-worker:aws
 ```
+
+## Licensing
+
+Each image bundles per-cloud third-party attribution under `licensing/<cloud>/`
+(`NOTICE` + verbatim `LICENSES/`), generated from the built image. After changing
+dependencies you must regenerate and commit those artifacts — CI enforces it via
+`gen_licenses.py --check`. See [`licensing/README.md`](licensing/README.md) for the
+regeneration workflow.
 
 ## Project structure
 
 ```
 src/llm_worker/
-  config.py       -- environment-based configuration
+  config.py       -- environment-based configuration + provider selection
   main.py         -- polling loop, batch orchestration, graceful shutdown
-  bedrock.py      -- Bedrock Converse client with retry and parallel execution
+  executor.py     -- provider-agnostic thread pool, retry, and result mapping
+  contract.py     -- MC eval contract v1 types + input normalization
+  providers/      -- pluggable LLM backends (bedrock, vertex, foundry)
   clickhouse.py   -- ClickHouse reads/writes for inputs, results, and batch status
 ```

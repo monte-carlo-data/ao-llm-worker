@@ -42,9 +42,7 @@ class JSONFormatter(logging.Formatter):
         }
 
         mcd = {
-            k: v
-            for k, v in record.__dict__.items()
-            if k not in _STDLIB_LOGRECORD_ATTRS
+            k: v for k, v in record.__dict__.items() if k not in _STDLIB_LOGRECORD_ATTRS
         }
         if mcd:
             payload["mcd"] = mcd

@@ -59,6 +59,20 @@ ORDER BY (batch_id, created_at)
 TTL created_at + INTERVAL 30 DAY DELETE
 """
 
+# Mirrors the helm sql/ migration for otel_traces.llm_worker_info. The worker
+# publishes its (cloud, provider); ReplacingMergeTree(updated_at) keeps a single
+# current row per (cloud, provider) so re-publishing on each startup is idempotent.
+CREATE_WORKER_INFO_TABLE = """
+CREATE TABLE IF NOT EXISTS llm_worker_info
+(
+    cloud       LowCardinality(String),
+    provider    LowCardinality(String),
+    updated_at  DateTime DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(updated_at)
+ORDER BY (cloud, provider)
+"""
+
 
 @pytest.fixture(scope="session")
 def ch_client():
@@ -76,6 +90,7 @@ def ch_client():
     raw_client.command(CREATE_INPUTS_TABLE)
     raw_client.command(CREATE_RESULTS_TABLE)
     raw_client.command(CREATE_BATCHES_TABLE)
+    raw_client.command(CREATE_WORKER_INFO_TABLE)
 
     client = ClickHouseClient(client=raw_client)
     yield client
@@ -93,4 +108,5 @@ def clean_tables(request):
     ch_client._client.command("TRUNCATE TABLE llm_inputs")
     ch_client._client.command("TRUNCATE TABLE llm_results")
     ch_client._client.command("TRUNCATE TABLE llm_batches")
+    ch_client._client.command("TRUNCATE TABLE llm_worker_info")
     yield

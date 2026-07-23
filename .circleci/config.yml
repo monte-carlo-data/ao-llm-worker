@@ -3,6 +3,49 @@ version: 2.1
 orbs:
   docker: circleci/docker@2.2.0
 
+commands:
+  license-drift-check:
+    description: >
+      Regenerate the platform's NOTICE + LICENSES/ from the just-built image and
+      fail if they differ from what's committed — so a dependency change can't
+      ship without its license artifacts being updated. Runs before the push.
+    parameters:
+      cloud:
+        type: string
+      image:
+        type: string
+    steps:
+      - run:
+          name: Verify license artifacts match the built image
+          command: |
+            python3 scripts/gen_licenses.py --cloud << parameters.cloud >> --image << parameters.image >> --check
+
+  build-check-push:
+    description: >
+      Build the per-cloud image, verify its license artifacts, and push. Shared
+      by the tagged-release and dev-branch jobs, which differ only in how they
+      compute the version and floating tag.
+    parameters:
+      cloud:
+        type: string
+      version:
+        type: string
+      latest_tag:
+        type: string
+    steps:
+      - docker/check:
+          use-docker-credentials-store: true
+      - docker/build:
+          image: montecarlodata/ao-llm-worker
+          tag: << parameters.version >>-<< parameters.cloud >>,<< parameters.latest_tag >>-<< parameters.cloud >>
+          extra_build_args: --build-arg CLOUD=<< parameters.cloud >>
+      - license-drift-check:
+          cloud: << parameters.cloud >>
+          image: montecarlodata/ao-llm-worker:<< parameters.version >>-<< parameters.cloud >>
+      - docker/push:
+          image: montecarlodata/ao-llm-worker
+          tag: << parameters.version >>-<< parameters.cloud >>,<< parameters.latest_tag >>-<< parameters.cloud >>
+
 jobs:
   lint:
     docker:
@@ -14,7 +57,7 @@ jobs:
           command: pip install uv
       - run:
           name: Install dependencies
-          command: uv sync --frozen
+          command: uv sync --frozen --all-extras
       - run:
           name: Ruff
           command: uv run ruff check src/ tests/
@@ -32,12 +75,15 @@ jobs:
           command: pip install uv
       - run:
           name: Install dependencies
-          command: uv sync --frozen
+          command: uv sync --frozen --all-extras
       - run:
           name: Unit tests
           command: uv run pytest
 
   build-and-push:
+    parameters:
+      cloud:
+        type: string
     machine:
       image: ubuntu-2204:current
     steps:
@@ -54,14 +100,28 @@ jobs:
       - run:
           name: Extract version from tag
           command: echo "export VERSION_TAG=${CIRCLE_TAG#v}" >> "$BASH_ENV"
-      - docker/check:
-          use-docker-credentials-store: true
-      - docker/build:
-          image: montecarlodata/ao-llm-worker
-          tag: ${VERSION_TAG},latest
-      - docker/push:
-          image: montecarlodata/ao-llm-worker
-          tag: ${VERSION_TAG},latest
+      - build-check-push:
+          cloud: << parameters.cloud >>
+          version: ${VERSION_TAG}
+          latest_tag: latest
+
+  # Pre-release images from the dev branch, matching the AO helm chart's dev
+  # scheme (0.0.0-dev.g<sha> per-commit + 0.0.0-latest floating), platform-suffixed.
+  publish-dev:
+    parameters:
+      cloud:
+        type: string
+    machine:
+      image: ubuntu-2204:current
+    steps:
+      - checkout
+      - run:
+          name: Compute dev version from commit
+          command: echo "export DEV_VERSION=0.0.0-dev.g$(git rev-parse --short=7 HEAD)" >> "$BASH_ENV"
+      - build-check-push:
+          cloud: << parameters.cloud >>
+          version: ${DEV_VERSION}
+          latest_tag: 0.0.0-latest
 
 workflows:
   build-and-deploy:
@@ -74,7 +134,22 @@ workflows:
           filters:
             tags:
               only: /^v.*/
+      - publish-dev:
+          matrix:
+            parameters:
+              cloud: [aws, azure, gcp]
+          context:
+            - docker
+          requires:
+            - lint
+            - test
+          filters:
+            branches:
+              only: dev
       - build-and-push:
+          matrix:
+            parameters:
+              cloud: [aws, azure, gcp]
           context:
             - docker
           requires:

@@ -56,6 +56,20 @@ class ClickHouseClient:
         else:
             raise ValueError("Either config or client must be provided")
 
+    def write_worker_info(self, cloud: str, provider: str) -> None:
+        """Publish this worker's cloud + provider so the monolith can resolve
+        the deployment's cloud-native model pool. The table defaults updated_at
+        to now(); a ReplacingMergeTree keyed on (cloud, provider) keeps a single
+        current row, so re-publishing on every startup is cheap and idempotent.
+        """
+        self._client.insert(
+            "llm_worker_info",
+            [[cloud, provider]],
+            column_names=["cloud", "provider"],
+            settings={"async_insert": 0},
+        )
+        logger.info("worker_info_written", extra={"cloud": cloud, "provider": provider})
+
     def get_pending_batches(self) -> list[UUID]:
         result = self._client.query(
             """
