@@ -19,6 +19,13 @@ can safely recover from crashes mid-batch. An auth/permission failure from the
 provider triggers a batch-level abort to avoid burning retries on every remaining
 row.
 
+On startup the worker publishes its `(cloud, provider)` to the
+`otel_traces.llm_worker_info` table. This is a **cross-service contract**: the
+monolith reads that marker to resolve which cloud-native Claude model pool a
+deployment uses (`aws`→bedrock, `gcp`→vertex, `azure`→foundry) when a batch's
+rows carry no explicit model. The write is best-effort — a failure is logged and
+never blocks batch processing.
+
 ## Quick start
 
 ```bash
