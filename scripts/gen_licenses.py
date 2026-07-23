@@ -285,6 +285,21 @@ def main() -> None:
             + " — collect it manually."
         )
 
+    # Fail closed on an unrecognized license family: a dependency whose license we
+    # haven't classified must be vetted by a human before it ships, not silently
+    # bucketed into "Other licenses".
+    unrecognized = [
+        p["name"]
+        for p in packages
+        if license_family(declared_license(p)) == "Other licenses"
+    ]
+    if unrecognized:
+        sys.exit(
+            "ERROR: unrecognized license family for: "
+            + ", ".join(sorted(unrecognized))
+            + " — vet the license and extend LICENSE_FAMILIES."
+        )
+
     out_dir = REPO_ROOT / "licensing" / args.cloud
     licenses_dir = out_dir / "LICENSES"
     # Clean the LICENSES tree so removed deps don't linger.
