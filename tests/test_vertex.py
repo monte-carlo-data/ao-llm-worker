@@ -4,7 +4,7 @@ import anthropic
 import httpx
 
 from llm_worker.config import VertexConfig
-from llm_worker.contract import ContractRequest, Tool, resolve_model_ref
+from llm_worker.contract import ContractRequest, Tool
 from llm_worker.providers.base import ErrorDisposition
 from llm_worker.providers.vertex import VertexProvider
 
@@ -89,8 +89,9 @@ class TestComplete:
 
         _provider(client).complete(_req())
 
-        assert client.messages.create.call_args.kwargs["model"] == resolve_model_ref(
-            "provider:claude-sonnet-4-5@20250929"
+        assert (
+            client.messages.create.call_args.kwargs["model"]
+            == "claude-sonnet-4-5@20250929"
         )
 
     def test_sends_max_tokens_and_temperature(self, mocker):
