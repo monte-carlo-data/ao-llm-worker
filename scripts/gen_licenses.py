@@ -58,14 +58,16 @@ for d in im.distributions():
         rel = s.split(".dist-info/", 1)[1]  # "licenses/LICENSE", "LICENSE", "METADATA", ...
         base = rel.rsplit("/", 1)[-1]
         # PEP 639 puts license files under licenses/; older wheels drop LICENSE-ish
-        # files in the dist-info root. Take both, keyed by basename (flattened).
+        # files in the dist-info root. Take both, keyed by their full path under
+        # dist-info so two files sharing a basename (e.g. a top-level LICENSE and a
+        # nested licenses/LICENSE) can't collide and overwrite one another.
         if rel.startswith("licenses/") or base.upper().startswith(
             ("LICENSE", "LICENCE", "COPYING", "NOTICE")
         ):
             # No try/except: a license file we can't read must abort loudly (the
             # container exits non-zero and extract() surfaces it) rather than
             # silently dropping attribution from the bundle.
-            files[base] = d.locate_file(f).read_text(errors="replace")
+            files[rel] = d.locate_file(f).read_text(errors="replace")
     out.append({
         "name": name,
         "version": md["Version"],
