@@ -32,7 +32,8 @@ never blocks batch processing.
 # install
 uv sync
 
-# run (needs CH + AWS credentials)
+# run (needs ClickHouse + the selected provider's credentials —
+# see the LLM provider section under Configuration)
 uv run llm-worker
 ```
 
