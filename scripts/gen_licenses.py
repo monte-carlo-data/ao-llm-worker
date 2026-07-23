@@ -83,6 +83,12 @@ for d in im.distributions():
 print(json.dumps(out))
 """
 
+# Fallback family for a declared license we don't recognize. A magic string with
+# control-flow meaning — returned by license_family(), grouped on by render_notice(),
+# and equality-tested by the fail-closed gate in main() — so it lives in one place;
+# renaming the label here keeps the gate wired.
+OTHER_LICENSES = "Other licenses"
+
 # Normalized license family for NOTICE grouping. Order matters: the first
 # family whose token appears in the declared license wins the grouping (a
 # package's full declared expression is still shown next to it).
@@ -116,7 +122,7 @@ def license_family(declared: str) -> str:
         # unrelated word ("permitted", "transmit") in a free-text license field.
         if any(re.search(rf"\b{re.escape(t)}\b", low) for t in tokens):
             return family
-    return "Other licenses"
+    return OTHER_LICENSES
 
 
 def best_url(pkg: dict) -> str:
@@ -232,7 +238,7 @@ def render_notice(cloud: str, packages: list[dict], has_uv: bool) -> str:
         "",
     ]
 
-    for family, _ in LICENSE_FAMILIES + [("Other licenses", ())]:
+    for family, _ in LICENSE_FAMILIES + [(OTHER_LICENSES, ())]:
         pkgs = groups.get(family)
         if not pkgs:
             continue
@@ -347,7 +353,7 @@ def main() -> None:
     unrecognized = [
         p["name"]
         for p in packages
-        if license_family(declared_license(p)) == "Other licenses"
+        if license_family(declared_license(p)) == OTHER_LICENSES
     ]
     if unrecognized:
         sys.exit(
