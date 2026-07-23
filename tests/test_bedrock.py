@@ -5,6 +5,7 @@ from llm_worker.config import BedrockConfig
 from llm_worker.contract import ContractRequest, Tool
 from llm_worker.providers.base import ErrorDisposition
 from llm_worker.providers.bedrock import (
+    RETRYABLE_ERROR_CODES,
     BedrockProvider,
     _build_converse_kwargs,
     _extract_output,
@@ -294,15 +295,7 @@ class TestClassifyError:
             == ErrorDisposition.ABORT_BATCH
         )
 
-    @pytest.mark.parametrize(
-        "code",
-        [
-            "ThrottlingException",
-            "InternalServerException",
-            "ModelNotReadyException",
-            "ServiceUnavailableException",
-        ],
-    )
+    @pytest.mark.parametrize("code", sorted(RETRYABLE_ERROR_CODES))
     def test_retryable_codes_retry(self, mocker, code):
         provider = _provider(mocker.Mock())
         assert provider.classify_error(_client_error(code)) == ErrorDisposition.RETRY
