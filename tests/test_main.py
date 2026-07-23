@@ -422,3 +422,19 @@ class TestRunStartup:
         mock_ch.write_worker_info.assert_called_once_with(
             mock_config.cloud, mock_config.provider
         )
+
+
+class TestPollLoopErrorHandling:
+    def test_executor_exception_crashes_loop(self):
+        ch = MagicMock()
+        ch.get_pending_batches.return_value = [BATCH_1]
+        ch.get_batch_rows.return_value = [MagicMock()]  # non-empty → reaches executor
+        executor = MagicMock()
+        executor.process_batch_iter.side_effect = RuntimeError("bug in executor")
+        service = _make_service(ch_mock=ch, bedrock_mock=executor)
+
+        # The poll loop only swallows ClickHouseError (its own I/O). An unexpected
+        # exception from the executor must propagate and crash the loop so the pod
+        # restarts, rather than being silently swallowed and spun on.
+        with pytest.raises(RuntimeError, match="bug in executor"):
+            service.run()
