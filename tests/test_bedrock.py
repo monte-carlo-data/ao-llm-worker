@@ -5,6 +5,7 @@ from llm_worker.config import BedrockConfig
 from llm_worker.contract import ContractRequest, Tool
 from llm_worker.providers.base import ErrorDisposition
 from llm_worker.providers.bedrock import (
+    NON_RETRYABLE_ERROR_CODES,
     RETRYABLE_ERROR_CODES,
     BedrockProvider,
     _build_converse_kwargs,
@@ -294,6 +295,24 @@ class TestClassifyError:
             provider.classify_error(_client_error("AccessDeniedException"))
             == ErrorDisposition.ABORT_BATCH
         )
+
+    # The parametrized tests below cover *add*-drift (a new code must be classified);
+    # these set-equality checks cover *remove*-drift (a code dropped from the set in a
+    # bad merge would otherwise pass silently). Together they pin both sets exactly.
+    def test_retryable_codes_are_exactly(self):
+        assert RETRYABLE_ERROR_CODES == {
+            "InternalServerException",
+            "ModelNotReadyException",
+            "ServiceUnavailableException",
+            "ThrottlingException",
+        }
+
+    def test_non_retryable_codes_are_exactly(self):
+        assert NON_RETRYABLE_ERROR_CODES == {
+            "AccessDeniedException",
+            "ValidationException",
+            "ResourceNotFoundException",
+        }
 
     @pytest.mark.parametrize("code", sorted(RETRYABLE_ERROR_CODES))
     def test_retryable_codes_retry(self, mocker, code):
