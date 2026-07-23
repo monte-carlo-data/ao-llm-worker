@@ -290,7 +290,7 @@ def main() -> None:
     # Clean the LICENSES tree so removed deps don't linger.
     if licenses_dir.exists():
         for child in sorted(licenses_dir.rglob("*"), reverse=True):
-            child.unlink() if child.is_file() else child.rmdir()
+            child.unlink() if (child.is_file() or child.is_symlink()) else child.rmdir()
     licenses_dir.mkdir(parents=True, exist_ok=True)
 
     for pkg in packages:
