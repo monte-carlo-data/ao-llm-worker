@@ -124,6 +124,14 @@ docker build --build-arg CLOUD=aws -t llm-worker:aws .
 docker run -e CH_HOST=clickhouse -e LLM_PROVIDER=bedrock -e AWS_REGION=us-east-1 llm-worker:aws
 ```
 
+## Licensing
+
+Each image bundles per-cloud third-party attribution under `licensing/<cloud>/`
+(`NOTICE` + verbatim `LICENSES/`), generated from the built image. After changing
+dependencies you must regenerate and commit those artifacts — CI enforces it via
+`gen_licenses.py --check`. See [`licensing/README.md`](licensing/README.md) for the
+regeneration workflow.
+
 ## Project structure
 
 ```
