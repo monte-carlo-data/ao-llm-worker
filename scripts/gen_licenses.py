@@ -108,7 +108,9 @@ def declared_license(pkg: dict) -> str:
 def license_family(declared: str) -> str:
     low = declared.lower()
     for family, tokens in LICENSE_FAMILIES:
-        if any(t in low for t in tokens):
+        # Word-boundary match so a short token like "mit" doesn't fire inside an
+        # unrelated word ("permitted", "transmit") in a free-text license field.
+        if any(re.search(rf"\b{re.escape(t)}\b", low) for t in tokens):
             return family
     return "Other licenses"
 
