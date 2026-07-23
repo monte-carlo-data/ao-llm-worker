@@ -322,6 +322,26 @@ def find_drift(out_dir: Path, outputs: dict[str, str]) -> list[str]:
     return drift
 
 
+def uv_license_present() -> bool:
+    """True if ``licensing/uv/`` ships the dual-license files the NOTICE references.
+
+    ``render_notice`` cites ``LICENSE-APACHE`` + ``LICENSE-MIT`` whenever the
+    directory exists, so a present-but-partial directory would yield a NOTICE
+    citing files the image doesn't ship — fail loudly instead, consistent with the
+    other fail-closed gates.
+    """
+    uv_dir = REPO_ROOT / "licensing" / "uv"
+    if not uv_dir.is_dir():
+        return False
+    missing = [n for n in ("LICENSE-APACHE", "LICENSE-MIT") if not (uv_dir / n).is_file()]
+    if missing:
+        sys.exit(
+            f"ERROR: licensing/uv/ is missing {', '.join(sorted(missing))} — the "
+            "generated NOTICE references these files."
+        )
+    return True
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--cloud", required=True, choices=["aws", "azure", "gcp"])
@@ -366,7 +386,7 @@ def main() -> None:
     # inventory. Its license lives at licensing/uv/ (shared, maintained by hand)
     # and the Dockerfile copies it into the image's LICENSES/ directly, so we only
     # note it in the NOTICE here — no duplication into the per-provider tree.
-    has_uv = (REPO_ROOT / "licensing" / "uv").is_dir()
+    has_uv = uv_license_present()
 
     out_dir = REPO_ROOT / "licensing" / args.cloud
     outputs = build_outputs(args.cloud, packages, has_uv)

@@ -213,3 +213,25 @@ class TestWriteAndDrift:
         gl.write_outputs(tmp_path, {"NOTICE": "n", "LICENSES/a/LICENSE": "a"})
         gl.write_outputs(tmp_path, {"NOTICE": "n"})
         assert not (tmp_path / "LICENSES/a/LICENSE").exists()
+
+
+class TestUvLicensePresent:
+    def test_absent_dir_returns_false(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(gl, "REPO_ROOT", tmp_path)
+        assert gl.uv_license_present() is False
+
+    def test_both_files_present_returns_true(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(gl, "REPO_ROOT", tmp_path)
+        uv = tmp_path / "licensing" / "uv"
+        uv.mkdir(parents=True)
+        (uv / "LICENSE-APACHE").write_text("a")
+        (uv / "LICENSE-MIT").write_text("m")
+        assert gl.uv_license_present() is True
+
+    def test_partial_dir_fails_loudly(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(gl, "REPO_ROOT", tmp_path)
+        uv = tmp_path / "licensing" / "uv"
+        uv.mkdir(parents=True)
+        (uv / "LICENSE-APACHE").write_text("a")  # LICENSE-MIT missing
+        with pytest.raises(SystemExit):
+            gl.uv_license_present()
