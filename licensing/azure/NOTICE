@@ -28,106 +28,106 @@ Apache License, Version 2.0
    1. clickhouse-connect 0.15.0  [Apache Software License]
       Copyright 2022-2024 ClickHouse, Inc.
       https://github.com/ClickHouse/clickhouse-connect
-      LICENSES/clickhouse-connect/LICENSE
+      LICENSES/clickhouse-connect/licenses/LICENSE
    2. cryptography 49.0.0  [Apache-2.0 OR BSD-3-Clause]
       Copyright (c) Individual contributors.
       https://github.com/pyca/cryptography
-      LICENSES/cryptography/LICENSE, LICENSES/cryptography/LICENSE.APACHE, LICENSES/cryptography/LICENSE.BSD
+      LICENSES/cryptography/licenses/LICENSE, LICENSES/cryptography/licenses/LICENSE.APACHE, LICENSES/cryptography/licenses/LICENSE.BSD
    3. distro 1.9.0  [Apache Software License]
       https://github.com/python-distro/distro
       LICENSES/distro/LICENSE
    4. requests 2.34.2  [Apache Software License]
       Copyright 2019 Kenneth Reitz
       https://github.com/psf/requests
-      LICENSES/requests/LICENSE, LICENSES/requests/NOTICE
+      LICENSES/requests/licenses/LICENSE, LICENSES/requests/licenses/NOTICE
    5. sniffio 1.3.1  [MIT License, Apache Software License]
       https://github.com/python-trio/sniffio
       LICENSES/sniffio/LICENSE, LICENSES/sniffio/LICENSE.APACHE2, LICENSES/sniffio/LICENSE.MIT
    6. tenacity 9.1.4  [Apache Software License]
       https://github.com/jd/tenacity
-      LICENSES/tenacity/LICENSE
+      LICENSES/tenacity/licenses/LICENSE
 
 Mozilla Public License 2.0
    1. certifi 2026.2.25  [Mozilla Public License 2.0 (MPL 2.0)]
       https://github.com/certifi/python-certifi
-      LICENSES/certifi/LICENSE
+      LICENSES/certifi/licenses/LICENSE
 
 Python Software Foundation License
    1. typing_extensions 4.15.0  [PSF-2.0]
       Copyright (c) 1991 - 1995, Stichting Mathematisch Centrum Amsterdam
       https://github.com/python/typing_extensions
-      LICENSES/typing-extensions/LICENSE
+      LICENSES/typing-extensions/licenses/LICENSE
 
 BSD License
    1. httpcore 1.0.9  [BSD-3-Clause]
       Copyright © 2020, [Encode OSS Ltd](https://www.encode.io/).
       https://www.encode.io/httpcore/
-      LICENSES/httpcore/LICENSE.md
+      LICENSES/httpcore/licenses/LICENSE.md
    2. httpx 0.28.1
       Copyright © 2019, [Encode OSS Ltd](https://www.encode.io/).
       https://github.com/encode/httpx
-      LICENSES/httpx/LICENSE.md
+      LICENSES/httpx/licenses/LICENSE.md
    3. idna 3.18  [BSD-3-Clause]
       Copyright (c) 2013-2026, Kim Davies and contributors.
       https://github.com/kjd/idna
-      LICENSES/idna/LICENSE.md
+      LICENSES/idna/licenses/LICENSE.md
    4. lz4 4.4.5
       Copyright (c) 2012-2013, Steeve Morin
       https://github.com/python-lz4/python-lz4
-      LICENSES/lz4/LICENSE
+      LICENSES/lz4/licenses/LICENSE
    5. pycparser 3.0  [BSD-3-Clause]
       Copyright (c) 2008-2022, Eli Bendersky
       https://github.com/eliben/pycparser
-      LICENSES/pycparser/LICENSE
+      LICENSES/pycparser/licenses/LICENSE
    6. zstandard 0.25.0  [BSD-3-Clause]
       Copyright (c) 2016, Gregory Szorc
       https://github.com/indygreg/python-zstandard
-      LICENSES/zstandard/LICENSE
+      LICENSES/zstandard/licenses/LICENSE
 
 MIT License
    1. annotated-types 0.7.0
       Copyright (c) 2022 the contributors
       https://github.com/annotated-types/annotated-types
-      LICENSES/annotated-types/LICENSE
+      LICENSES/annotated-types/licenses/LICENSE
    2. anthropic 0.116.0
       Copyright 2023 Anthropic, PBC.
       https://github.com/anthropics/anthropic-sdk-python
-      LICENSES/anthropic/LICENSE
+      LICENSES/anthropic/licenses/LICENSE
    3. anyio 4.14.1
       Copyright (c) 2018 Alex Grönholm
       https://github.com/agronholm/anyio
-      LICENSES/anyio/LICENSE
+      LICENSES/anyio/licenses/LICENSE
    4. azure-core 1.41.0
       Copyright (c) Microsoft Corporation.
       https://github.com/Azure/azure-sdk-for-python/tree/main/sdk/core/azure-core
-      LICENSES/azure-core/LICENSE
+      LICENSES/azure-core/licenses/LICENSE
    5. azure-identity 1.25.3
       Copyright (c) Microsoft Corporation.
       https://github.com/Azure/azure-sdk-for-python
-      LICENSES/azure-identity/LICENSE
+      LICENSES/azure-identity/licenses/LICENSE
    6. cffi 2.1.0  [MIT-0]
       https://github.com/python-cffi/cffi
-      LICENSES/cffi/LICENSE
+      LICENSES/cffi/licenses/LICENSE
    7. charset-normalizer 3.4.9
       Copyright (c) 2025 TAHRI Ahmed R.
       https://github.com/jawah/charset_normalizer
-      LICENSES/charset-normalizer/LICENSE
+      LICENSES/charset-normalizer/licenses/LICENSE
    8. docstring_parser 0.18.0
       Copyright (c) 2018 Marcin Kurczewski
       https://github.com/rr-/docstring_parser
-      LICENSES/docstring-parser/LICENSE.md
+      LICENSES/docstring-parser/licenses/LICENSE.md
    9. h11 0.16.0
       Copyright (c) 2016 Nathaniel J. Smith <njs@pobox.com> and other contributors
       https://github.com/python-hyper/h11
-      LICENSES/h11/LICENSE.txt
+      LICENSES/h11/licenses/LICENSE.txt
   10. jiter 0.16.0
       Copyright (c) 2022 to present Samuel Colvin
       https://github.com/pydantic/jiter/
-      LICENSES/jiter/LICENSE
+      LICENSES/jiter/licenses/LICENSE
   11. msal 1.37.0
       Copyright (c) Microsoft Corporation.
       https://github.com/AzureAD/microsoft-authentication-library-for-python
-      LICENSES/msal/LICENSE
+      LICENSES/msal/licenses/LICENSE
   12. msal-extensions 1.3.1
       Copyright (c) Microsoft Corporation. All rights reserved.
       https://github.com/AzureAD/microsoft-authentication-extensions-for-python/releases
@@ -135,15 +135,15 @@ MIT License
   13. pydantic 2.13.4
       Copyright (c) 2017 to present Pydantic Services Inc. and individual contributors.
       https://github.com/pydantic/pydantic
-      LICENSES/pydantic/LICENSE
+      LICENSES/pydantic/licenses/LICENSE
   14. pydantic_core 2.46.4
       Copyright (c) 2022 Samuel Colvin
       https://github.com/pydantic/pydantic
-      LICENSES/pydantic-core/LICENSE
+      LICENSES/pydantic-core/licenses/LICENSE
   15. PyJWT 2.13.0
       Copyright (c) 2015-2022 José Padilla
       https://github.com/jpadilla/pyjwt
-      LICENSES/pyjwt/AUTHORS.rst, LICENSES/pyjwt/LICENSE
+      LICENSES/pyjwt/licenses/AUTHORS.rst, LICENSES/pyjwt/licenses/LICENSE
   16. pytz 2026.1.post1
       Copyright (c) 2003-2019 Stuart Bishop <stuart@stuartbishop.net>
       http://pythonhosted.org/pytz
@@ -151,11 +151,11 @@ MIT License
   17. typing-inspection 0.4.2
       Copyright (c) Pydantic Services Inc. 2025 to present
       https://github.com/pydantic/typing-inspection
-      LICENSES/typing-inspection/LICENSE
+      LICENSES/typing-inspection/licenses/LICENSE
   18. urllib3 2.7.0
       Copyright (c) 2008-2020 Andrey Petrov and contributors.
       https://github.com/urllib3/urllib3
-      LICENSES/urllib3/LICENSE.txt
+      LICENSES/urllib3/licenses/LICENSE.txt
 
 Build tooling
   uv (the Python package installer) is copied into the image from the

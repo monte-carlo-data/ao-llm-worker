@@ -36,7 +36,7 @@ Apache License, Version 2.0
    3. clickhouse-connect 0.15.0  [Apache Software License]
       Copyright 2022-2024 ClickHouse, Inc.
       https://github.com/ClickHouse/clickhouse-connect
-      LICENSES/clickhouse-connect/LICENSE
+      LICENSES/clickhouse-connect/licenses/LICENSE
    4. python-dateutil 2.9.0.post0  [BSD License, Apache Software License]
       Copyright 2017- Paul Ganssle <paul@ganssle.io>
       https://github.com/dateutil/dateutil
@@ -47,22 +47,22 @@ Apache License, Version 2.0
       LICENSES/s3transfer/LICENSE.txt, LICENSES/s3transfer/NOTICE.txt
    6. tenacity 9.1.4  [Apache Software License]
       https://github.com/jd/tenacity
-      LICENSES/tenacity/LICENSE
+      LICENSES/tenacity/licenses/LICENSE
 
 Mozilla Public License 2.0
    1. certifi 2026.2.25  [Mozilla Public License 2.0 (MPL 2.0)]
       https://github.com/certifi/python-certifi
-      LICENSES/certifi/LICENSE
+      LICENSES/certifi/licenses/LICENSE
 
 BSD License
    1. lz4 4.4.5
       Copyright (c) 2012-2013, Steeve Morin
       https://github.com/python-lz4/python-lz4
-      LICENSES/lz4/LICENSE
+      LICENSES/lz4/licenses/LICENSE
    2. zstandard 0.25.0  [BSD-3-Clause]
       Copyright (c) 2016, Gregory Szorc
       https://github.com/indygreg/python-zstandard
-      LICENSES/zstandard/LICENSE
+      LICENSES/zstandard/licenses/LICENSE
 
 MIT License
    1. jmespath 1.1.0
@@ -80,7 +80,7 @@ MIT License
    4. urllib3 2.7.0
       Copyright (c) 2008-2020 Andrey Petrov and contributors.
       https://github.com/urllib3/urllib3
-      LICENSES/urllib3/LICENSE.txt
+      LICENSES/urllib3/licenses/LICENSE.txt
 
 Build tooling
   uv (the Python package installer) is copied into the image from the
