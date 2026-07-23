@@ -19,11 +19,13 @@ directly; this script only records it in the generated NOTICE.
 Usage:
     python scripts/gen_licenses.py --cloud aws --image montecarlodata/ao-llm-worker:0.0.0-latest-aws
     python scripts/gen_licenses.py --cloud gcp --image montecarlodata/ao-llm-worker:0.0.0-latest-gcp
+    # verify committed artifacts match the image without writing (used by CI):
+    python scripts/gen_licenses.py --cloud aws --image <ref> --check
 
-CI runs this against the freshly built image, then `git add -A licensing/<cloud>`
-followed by `git diff --cached --quiet` to fail if the committed artifacts drift
-from what actually ships (the staged form also catches newly added, untracked
-files).
+CI runs this with --check against the freshly built image: it regenerates the
+NOTICE + LICENSES/ in memory and compares them to what's committed, failing on
+any missing, changed, or stale file (see find_drift) — so a dependency change
+can't ship without its license artifacts being updated.
 """
 
 from __future__ import annotations
