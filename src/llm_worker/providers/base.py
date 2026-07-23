@@ -46,12 +46,12 @@ class LLMProvider(ABC):
     result mapping are owned by the executor — not the provider.
     """
 
-    # Resolved model refs learned to reject a custom temperature. Per-model,
-    # not process-wide: a single provider instance serves many models (it
-    # honors request.model_id), and only some models deprecate temperature —
-    # a shared flag would needlessly strip determinism from the rest.
-    # Subclasses initialize this in their own __init__.
-    _omit_temperature: set[str]
+    def __init__(self) -> None:
+        # Resolved model refs learned to reject a custom temperature. Per-model,
+        # not process-wide: a single provider instance serves many models (it
+        # honors request.model_id), and only some models deprecate temperature —
+        # a shared flag would needlessly strip determinism from the rest.
+        self._omit_temperature: set[str] = set()
 
     @abstractmethod
     def complete(self, request: ContractRequest) -> LLMResponse:

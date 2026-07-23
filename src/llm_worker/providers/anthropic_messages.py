@@ -36,12 +36,8 @@ class AnthropicMessagesProvider(LLMProvider):
     """Base adapter for backends that speak the Anthropic Messages API."""
 
     def __init__(self, client):
+        super().__init__()
         self._client = client
-        # Resolved model refs learned to reject a custom temperature. Per-model,
-        # not process-wide: this adapter serves many models (it honors model_id),
-        # and only some deprecate temperature — a shared flag would needlessly
-        # strip determinism from the models that still accept it.
-        self._omit_temperature: set[str] = set()
 
     def complete(self, request: ContractRequest) -> LLMResponse:
         model = resolve_model_ref(request.model_id)

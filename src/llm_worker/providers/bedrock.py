@@ -51,15 +51,10 @@ def _is_retryable(exc: BaseException) -> bool:
 
 class BedrockProvider(LLMProvider):
     def __init__(self, config: BedrockConfig, boto_client=None):
+        super().__init__()
         self._client = boto_client or boto3.client(
             "bedrock-runtime", region_name=config.region
         )
-        # Resolved model refs learned to reject a custom temperature — the
-        # adaptive-thinking models (Opus 4.7+, Sonnet 5) return a ValidationException
-        # "temperature is deprecated for this model". Per-model, not process-wide: the
-        # adapter honors model_id and only some models deprecate it (Haiku 4.5 still
-        # accepts it), so a shared flag would needlessly drop determinism for the rest.
-        self._omit_temperature: set[str] = set()
 
     def complete(self, request: ContractRequest) -> LLMResponse:
         model = resolve_model_ref(request.model_id)
