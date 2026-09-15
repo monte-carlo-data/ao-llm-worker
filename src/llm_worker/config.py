@@ -1,6 +1,10 @@
+import json
+import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import ClassVar
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -23,6 +27,9 @@ class BedrockConfig:
     provider: ClassVar[str] = "bedrock"
     cloud: ClassVar[str] = "aws"
     region: str
+    # model_id -> Bedrock application-inference-profile ARN, for cost
+    # attribution. Optional; an unmapped model_id is invoked as-is.
+    inference_profiles: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -91,13 +98,38 @@ def _require_env(name: str) -> str:
     return value
 
 
+def _parse_env_json_str_map(name: str, default: str = "{}") -> dict[str, str]:
+    """Parse `name` as a flat JSON object of string to string, skipping (and
+    logging) any entry whose value isn't a string rather than failing the
+    whole map."""
+    raw = os.environ.get(name) or default
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        raise ValueError(f"{name}={raw!r} is not valid JSON") from None
+    if not isinstance(value, dict):
+        raise ValueError(f"{name} must be a JSON object")
+    result: dict[str, str] = {}
+    for key, entry in value.items():
+        if not isinstance(entry, str):
+            logger.warning(
+                "config_json_map_entry_invalid", extra={"env_var": name, "key": key}
+            )
+            continue
+        result[key] = entry
+    return result
+
+
 # Env-config loaders, one per provider. Referenced by the provider registry in
 # providers/__init__.py (the single source of truth for provider dispatch), which
 # maps each LLM_PROVIDER name to its loader and adapter factory.
 def load_bedrock_config() -> BedrockConfig:
     # Bedrock's timeouts are handled by botocore (bounded by default), so the
     # Anthropic-client request timeout doesn't apply here.
-    return BedrockConfig(region=os.environ.get("AWS_REGION", "us-east-1"))
+    return BedrockConfig(
+        region=os.environ.get("AWS_REGION", "us-east-1"),
+        inference_profiles=_parse_env_json_str_map("BEDROCK_INFERENCE_PROFILES"),
+    )
 
 
 def load_vertex_config() -> VertexConfig:

@@ -26,6 +26,10 @@ deployment uses (`aws`→bedrock, `gcp`→vertex, `azure`→foundry) when a batc
 rows carry no explicit model. The write is best-effort — a failure is logged and
 never blocks batch processing.
 
+On the `bedrock` provider, a `converse()` call resolves through a
+cost-attribution inference profile ARN when `BEDROCK_INFERENCE_PROFILES` maps
+its model id to one, falling back to the bare model id otherwise.
+
 ## Quick start
 
 ```bash
@@ -68,9 +72,10 @@ Provider-specific settings — only the selected provider's vars are read:
 
 **`bedrock`** (aws image) — auth via the pod's AWS credentials (IRSA):
 
-| Variable     | Default     | Description            |
-| ------------ | ----------- | ---------------------- |
-| `AWS_REGION` | `us-east-1` | AWS region for Bedrock |
+| Variable                     | Default     | Description                                                                   |
+| ---------------------------- | ----------- | ------------------------------------------------------------------------------ |
+| `AWS_REGION`                  | `us-east-1` | AWS region for Bedrock                                                        |
+| `BEDROCK_INFERENCE_PROFILES` | `{}`        | JSON object mapping a model id to its application-inference-profile ARN, for cost attribution. Unmapped models invoke as-is. |
 
 **`vertex`** (gcp image) — Claude on Vertex AI, auth via GKE Workload Identity (ADC, no key):
 
