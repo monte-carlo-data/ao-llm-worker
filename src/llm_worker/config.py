@@ -28,7 +28,9 @@ class BedrockConfig:
     cloud: ClassVar[str] = "aws"
     region: str
     # model_id -> Bedrock application-inference-profile ARN, for cost
-    # attribution. Optional; an unmapped model_id is invoked as-is.
+    # attribution. Optional; an unmapped model_id is invoked as-is. Bedrock-only
+    # because inference profiles are AWS's own per-call cost-attribution handle;
+    # Vertex/Foundry attribute spend by GCP project / Azure resource instead.
     inference_profiles: dict[str, str] = field(default_factory=dict)
 
 
@@ -98,11 +100,11 @@ def _require_env(name: str) -> str:
     return value
 
 
-def _parse_env_json_str_map(name: str, default: str = "{}") -> dict[str, str]:
+def _parse_env_json_str_map(name: str) -> dict[str, str]:
     """Parse `name` as a flat JSON object of string to string, skipping (and
-    logging) any entry whose value isn't a string rather than failing the
-    whole map."""
-    raw = os.environ.get(name) or default
+    logging) any entry whose value isn't a non-empty string starting with
+    "arn:" rather than failing the whole map."""
+    raw = os.environ.get(name) or "{}"
     try:
         value = json.loads(raw)
     except json.JSONDecodeError:
@@ -111,7 +113,7 @@ def _parse_env_json_str_map(name: str, default: str = "{}") -> dict[str, str]:
         raise ValueError(f"{name} must be a JSON object")
     result: dict[str, str] = {}
     for key, entry in value.items():
-        if not isinstance(entry, str):
+        if not isinstance(entry, str) or not entry.startswith("arn:"):
             logger.warning(
                 "config_json_map_entry_invalid", extra={"env_var": name, "key": key}
             )

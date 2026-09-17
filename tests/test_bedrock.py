@@ -1,3 +1,5 @@
+import time
+
 import pytest
 from botocore.exceptions import ClientError, EndpointConnectionError
 
@@ -206,6 +208,9 @@ class TestComplete:
 
 class TestInferenceProfileResolution:
     ARN = "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/abc123"
+    ARN_2 = (
+        "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/def456"
+    )
 
     def test_resolves_to_profile_arn_when_configured(self, mocker):
         mock_boto = mocker.Mock()
@@ -224,6 +229,19 @@ class TestInferenceProfileResolution:
         _provider(mock_boto).complete(_req(model_id="model-1"))
 
         assert mock_boto.converse.call_args[1]["modelId"] == "model-1"
+
+    def test_profile_lookup_uses_resolved_model_id(self, mocker):
+        """The inference-profile map is keyed on the bare model id produced by
+        resolve_model_ref, not the raw request.model_id -- a namespaced id
+        must still resolve to the configured ARN."""
+        mock_boto = mocker.Mock()
+        mock_boto.converse.return_value = _text_response("ok")
+
+        _provider(mock_boto, inference_profiles={"model-1": self.ARN}).complete(
+            _req(model_id="provider:model-1")
+        )
+
+        assert mock_boto.converse.call_args[1]["modelId"] == self.ARN
 
     def test_invalid_profile_arn_retries_with_bare_model_id(self, mocker):
         mock_boto = mocker.Mock()
@@ -251,6 +269,23 @@ class TestInferenceProfileResolution:
             )
 
         assert mock_boto.converse.call_count == 1
+
+    def test_no_profile_configured_resource_not_found_raises_without_retry(
+        self, mocker
+    ):
+        """With no inference profile configured, resolved_model == model, so
+        a ResourceNotFoundException here means the bare model id itself is
+        invalid -- not a bad profile ARN. It must raise immediately, without
+        a doomed retry against the same id or a bogus cooldown entry."""
+        mock_boto = mocker.Mock()
+        mock_boto.converse.side_effect = _client_error("ResourceNotFoundException")
+        provider = _provider(mock_boto)
+
+        with pytest.raises(ClientError):
+            provider.complete(_req(model_id="model-1"))
+
+        assert mock_boto.converse.call_count == 1
+        assert "model-1" not in provider._profile_invalid_since
 
     def test_unrelated_validation_error_with_resolved_arn_still_raises(self, mocker):
         """A ValidationException unrelated to the ARN (e.g. a token-limit
@@ -315,6 +350,26 @@ class TestInferenceProfileResolution:
 
         assert mock_boto.converse.call_count == 3
         assert mock_boto.converse.call_args_list[2].kwargs["modelId"] == self.ARN
+
+    def test_cooldown_is_per_model(self, mocker):
+        """A stale ARN cooldown for one model must not suppress ARN
+        resolution for a different model."""
+        mock_boto = mocker.Mock()
+        mock_boto.converse.side_effect = [
+            _client_error("ResourceNotFoundException"),
+            _text_response("ok"),
+            _text_response("ok2"),
+        ]
+        provider = _provider(
+            mock_boto,
+            inference_profiles={"model-1": self.ARN, "model-2": self.ARN_2},
+        )
+
+        provider.complete(_req(model_id="model-1"))  # fails on ARN, enters cooldown
+        provider.complete(_req(model_id="model-2"))  # different model, unaffected
+
+        assert mock_boto.converse.call_count == 3
+        assert mock_boto.converse.call_args_list[2].kwargs["modelId"] == self.ARN_2
 
 
 class TestTemperatureFallback:
@@ -404,9 +459,10 @@ class TestTemperatureFallback:
 
     def test_learned_rejection_survives_profile_resolution_flip(self, mocker):
         """The learned _omit_temperature state must key on the stable bare
-        model id, not whichever ARN/bare-id form resolution returns —
-        otherwise a config change mid-process makes the provider re-learn a
-        rejection it already knows about."""
+        model id, not whichever ARN/bare-id form resolution returns --
+        otherwise the ARN-invalid cooldown flipping a model from its profile
+        ARN to the bare id would make the provider re-learn a rejection it
+        already knows about."""
         arn = "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/abc123"
         mock_boto = mocker.Mock()
         mock_boto.converse.side_effect = [
@@ -420,7 +476,10 @@ class TestTemperatureFallback:
             _req(model_id="model-1")
         )  # resolves to the ARN, rejects, learns
 
-        provider._inference_profiles = {}
+        # Force the ARN into cooldown the same way an invalid-ARN response
+        # would, without reassigning _inference_profiles (production never
+        # mutates that after construction).
+        provider._profile_invalid_since["model-1"] = time.monotonic()
         provider.complete(_req(model_id="model-1"))  # resolves to the bare id this time
 
         assert mock_boto.converse.call_count == 3
