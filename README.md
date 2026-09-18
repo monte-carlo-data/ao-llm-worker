@@ -79,9 +79,10 @@ Provider-specific settings — only the selected provider's vars are read:
 | `AWS_REGION`                  | `us-east-1` | AWS region for Bedrock                                                        |
 | `BEDROCK_INFERENCE_PROFILES` | `{}`        | JSON object mapping a model id to its application-inference-profile ARN, for cost attribution. Unmapped models invoke as-is. |
 
-Map keys must be the bare model id, after any `mc:`/`provider:` style prefix is
-stripped — a row with `model_id: "provider:us.anthropic.claude-sonnet-5"` is
-keyed in the map as `"us.anthropic.claude-sonnet-5"`, not the prefixed form.
+Map keys go through the same `mc:`/`provider:` prefix stripping as an invoked
+model id, so a key can be given either as the bare model id or with the
+prefix — `"us.anthropic.claude-sonnet-5"` and `"provider:us.anthropic.claude-sonnet-5"`
+both match a row with `model_id: "provider:us.anthropic.claude-sonnet-5"`.
 
 **`vertex`** (gcp image) — Claude on Vertex AI, auth via GKE Workload Identity (ADC, no key):
 

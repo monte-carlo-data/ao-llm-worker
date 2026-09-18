@@ -4,6 +4,8 @@ import os
 from dataclasses import dataclass, field
 from typing import ClassVar
 
+from llm_worker.contract import resolve_model_ref
+
 logger = logging.getLogger(__name__)
 
 
@@ -128,9 +130,16 @@ def _parse_env_json_str_map(name: str) -> dict[str, str]:
 def load_bedrock_config() -> BedrockConfig:
     # Bedrock's timeouts are handled by botocore (bounded by default), so the
     # Anthropic-client request timeout doesn't apply here.
+    raw_profiles = _parse_env_json_str_map("BEDROCK_INFERENCE_PROFILES")
+    # Keys go through the same mc:/provider: stripping as an invoked model_id,
+    # so a deployer who copies a row's model_id verbatim still gets a match
+    # instead of a silent no-op.
+    inference_profiles = {
+        resolve_model_ref(model_ref): arn for model_ref, arn in raw_profiles.items()
+    }
     return BedrockConfig(
         region=os.environ.get("AWS_REGION", "us-east-1"),
-        inference_profiles=_parse_env_json_str_map("BEDROCK_INFERENCE_PROFILES"),
+        inference_profiles=inference_profiles,
     )
 
 

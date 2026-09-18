@@ -34,6 +34,18 @@ def test_bedrock_inference_profiles_from_env(monkeypatch):
     assert cfg.inference_profiles == {"us.anthropic.claude-sonnet-5": arn}
 
 
+def test_bedrock_inference_profiles_key_prefix_is_stripped(monkeypatch):
+    """A key copied verbatim from a row's model_id (e.g. "provider:...") must
+    still match, so it normalizes the same way an invoked model_id does."""
+    arn = "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/abc123"
+    monkeypatch.setenv(
+        "BEDROCK_INFERENCE_PROFILES",
+        f'{{"provider:us.anthropic.claude-sonnet-5": "{arn}"}}',
+    )
+    cfg = load_provider_config("bedrock")
+    assert cfg.inference_profiles == {"us.anthropic.claude-sonnet-5": arn}
+
+
 def test_bedrock_inference_profiles_empty_string_is_treated_as_unset(monkeypatch):
     monkeypatch.setenv("BEDROCK_INFERENCE_PROFILES", "")
     assert load_provider_config("bedrock").inference_profiles == {}
