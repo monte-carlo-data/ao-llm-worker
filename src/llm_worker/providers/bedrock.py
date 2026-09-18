@@ -3,7 +3,11 @@
 Translates a v1 :class:`~llm_worker.contract.ContractRequest` to the Bedrock
 Converse API and back — re-nesting the flat contract tool spec into Bedrock's
 `toolSpec`/`inputSchema`/`toolChoice` shape — and classifies botocore/Bedrock
-exceptions. Retry and orchestration live in the executor.
+exceptions. Retry and orchestration live in the executor, with one exception:
+this adapter retries once internally when the configured cost-attribution
+inference-profile ARN turns out to be stale or invalid, falling back to the
+bare model id before deferring to the executor's retry loop for everything
+else.
 """
 
 import logging
@@ -83,6 +87,7 @@ class BedrockProvider(LLMProvider):
         )
         self._inference_profiles = config.inference_profiles
         self._profile_invalid_since: dict[str, float] = {}
+        self._unmapped_models_warned: set[str] = set()
 
     def complete(self, request: ContractRequest) -> LLMResponse:
         model = resolve_model_ref(request.model_id)
@@ -116,7 +121,15 @@ class BedrockProvider(LLMProvider):
             and time.monotonic() - invalid_since < _PROFILE_ARN_COOLDOWN_SECONDS
         ):
             return model
-        return self._inference_profiles.get(model, model)
+        if model not in self._inference_profiles:
+            if model not in self._unmapped_models_warned:
+                self._unmapped_models_warned.add(model)
+                logger.warning(
+                    "bedrock_inference_profile_unmapped",
+                    extra={"model_id": model},
+                )
+            return model
+        return self._inference_profiles[model]
 
     def _converse(self, request: ContractRequest, model: str, resolved_model: str):
         # `model` (stable, never an ARN) keys the temperature-fallback learned

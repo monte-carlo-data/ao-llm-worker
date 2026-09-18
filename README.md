@@ -28,7 +28,9 @@ never blocks batch processing.
 
 On the `bedrock` provider, a `converse()` call resolves through a
 cost-attribution inference profile ARN when `BEDROCK_INFERENCE_PROFILES` maps
-its model id to one, falling back to the bare model id otherwise.
+its model id to one, falling back to the bare model id otherwise. If Bedrock
+rejects that ARN as not found, the call retries once with the bare model id,
+and the ARN is skipped for 300 seconds before being tried again.
 
 ## Quick start
 
@@ -76,6 +78,11 @@ Provider-specific settings — only the selected provider's vars are read:
 | ---------------------------- | ----------- | ------------------------------------------------------------------------------ |
 | `AWS_REGION`                  | `us-east-1` | AWS region for Bedrock                                                        |
 | `BEDROCK_INFERENCE_PROFILES` | `{}`        | JSON object mapping a model id to its application-inference-profile ARN, for cost attribution. Unmapped models invoke as-is. |
+
+Map keys go through the same `mc:`/`provider:` prefix stripping as an invoked
+model id, so a key can be given either as the bare model id or with the
+prefix — `"us.anthropic.claude-sonnet-5"` and `"provider:us.anthropic.claude-sonnet-5"`
+both match a row with `model_id: "provider:us.anthropic.claude-sonnet-5"`.
 
 **`vertex`** (gcp image) — Claude on Vertex AI, auth via GKE Workload Identity (ADC, no key):
 
