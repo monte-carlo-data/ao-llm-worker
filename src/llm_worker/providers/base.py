@@ -77,8 +77,11 @@ class LLMProvider(ABC):
         """Translate a normalized v1 request to the backend and return the
         canonical response.
 
-        Raises the backend's native exception on failure; does not retry (the
-        executor wraps this call with retry driven by :meth:`classify_error`).
+        Raises the backend's native exception on failure; does not retry for
+        general transient failures (the executor wraps this call with retry
+        driven by :meth:`classify_error`). An adapter may still retry once
+        internally for a narrow backend-specific concern that only it can
+        resolve.
         """
 
     @abstractmethod

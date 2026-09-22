@@ -10,16 +10,62 @@ from llm_worker.providers.bedrock import BedrockProvider
 # --- load_provider_config: env-config resolution + dispatch ---
 def test_load_provider_config_default_bedrock(monkeypatch):
     monkeypatch.delenv("AWS_REGION", raising=False)
+    monkeypatch.delenv("BEDROCK_INFERENCE_PROFILES", raising=False)
     cfg = load_provider_config("bedrock")
     assert isinstance(cfg, BedrockConfig)
     assert cfg.provider == "bedrock"
     assert cfg.cloud == "aws"
     assert cfg.region == "us-east-1"
+    assert cfg.inference_profiles == {}
 
 
 def test_bedrock_region_from_env(monkeypatch):
     monkeypatch.setenv("AWS_REGION", "us-west-2")
     assert load_provider_config("bedrock").region == "us-west-2"
+
+
+def test_bedrock_inference_profiles_from_env(monkeypatch):
+    arn = "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/abc123"
+    monkeypatch.setenv(
+        "BEDROCK_INFERENCE_PROFILES",
+        f'{{"us.anthropic.claude-sonnet-5": "{arn}"}}',
+    )
+    cfg = load_provider_config("bedrock")
+    assert cfg.inference_profiles == {"us.anthropic.claude-sonnet-5": arn}
+
+
+def test_bedrock_inference_profiles_key_prefix_is_stripped(monkeypatch):
+    """A key copied verbatim from a row's model_id (e.g. "provider:...") must
+    still match, so it normalizes the same way an invoked model_id does."""
+    arn = "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/abc123"
+    monkeypatch.setenv(
+        "BEDROCK_INFERENCE_PROFILES",
+        f'{{"provider:us.anthropic.claude-sonnet-5": "{arn}"}}',
+    )
+    cfg = load_provider_config("bedrock")
+    assert cfg.inference_profiles == {"us.anthropic.claude-sonnet-5": arn}
+
+
+def test_bedrock_inference_profiles_empty_string_is_treated_as_unset(monkeypatch):
+    monkeypatch.setenv("BEDROCK_INFERENCE_PROFILES", "")
+    assert load_provider_config("bedrock").inference_profiles == {}
+
+
+def test_bedrock_inference_profiles_skips_invalid_entries(monkeypatch):
+    arn = "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/abc123"
+    monkeypatch.setenv(
+        "BEDROCK_INFERENCE_PROFILES",
+        f'{{"bad-model": 1, "good-model": "{arn}"}}',
+    )
+    cfg = load_provider_config("bedrock")
+    assert cfg.inference_profiles == {"good-model": arn}
+
+
+@pytest.mark.parametrize("raw", ["not json", "[]", '{1: "arn"}'])
+def test_bedrock_inference_profiles_rejects_malformed_env(monkeypatch, raw):
+    monkeypatch.setenv("BEDROCK_INFERENCE_PROFILES", raw)
+    with pytest.raises(ValueError):
+        load_provider_config("bedrock")
 
 
 def test_load_vertex_config(monkeypatch):
