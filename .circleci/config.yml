@@ -2,6 +2,7 @@ version: 2.1
 
 orbs:
   docker: circleci/docker@2.2.0
+  mcd-tools: monte-carlo/mcd-ci-tools@1.12.0
 
 commands:
   license-drift-check:
@@ -42,6 +43,15 @@ commands:
       - license-drift-check:
           cloud: << parameters.cloud >>
           image: montecarlodata/ao-llm-worker:<< parameters.version >>-<< parameters.cloud >>
+      # Azure leg only (SEC-3726). Warn mode: findings are reported in the log and the
+      # vuln-image-scan artifacts, and the push still happens. Set fail_on_findings: true to block.
+      - when:
+          condition:
+            equal: [azure, << parameters.cloud >>]
+          steps:
+            - mcd-tools/vuln-image-scan:
+                image: montecarlodata/ao-llm-worker:<< parameters.version >>-<< parameters.cloud >>
+                scanners: trivy,scout,wiz,aikido
       - docker/push:
           image: montecarlodata/ao-llm-worker
           tag: << parameters.version >>-<< parameters.cloud >>,<< parameters.latest_tag >>-<< parameters.cloud >>
@@ -139,9 +149,23 @@ workflows:
       - publish-dev:
           matrix:
             parameters:
-              cloud: [aws, azure, gcp]
+              cloud: [aws, gcp]
           context:
             - docker
+          requires:
+            - lint
+            - test
+          filters:
+            branches:
+              only: dev
+      # Azure scans its image before the push (SEC-3726), so only this leg gets the scanner
+      # credentials. Same job name the matrix used to generate.
+      - publish-dev:
+          name: publish-dev-azure
+          cloud: azure
+          context:
+            - docker
+            - vuln-image-scan
           requires:
             - lint
             - test
@@ -151,9 +175,25 @@ workflows:
       - build-and-push:
           matrix:
             parameters:
-              cloud: [aws, azure, gcp]
+              cloud: [aws, gcp]
           context:
             - docker
+          requires:
+            - lint
+            - test
+          filters:
+            tags:
+              only: /^v.*/
+            branches:
+              ignore: /.*/
+      # Azure scans its image before the push (SEC-3726), so only this leg gets the scanner
+      # credentials. Same job name the matrix used to generate.
+      - build-and-push:
+          name: build-and-push-azure
+          cloud: azure
+          context:
+            - docker
+            - vuln-image-scan
           requires:
             - lint
             - test
