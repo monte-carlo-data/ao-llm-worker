@@ -248,9 +248,14 @@ class TestAbort:
         # clear invoke()'s abort_event check (and reach the provider) before
         # either resolves, so this proves the abort disposition doesn't race
         # ahead of a call that was already in flight when it happened.
+        #
+        # Row 1 is held until row 0's invoke() has returned, i.e. until abort_event
+        # is set. Without that hold, row 1 can finish while row 0 is still between
+        # raising and abort_event.set(); the loop then submits rows 2-4, which run
+        # to completion instead of being reported aborted.
         lock = threading.Lock()
         both_started = threading.Event()
-        release = threading.Event()
+        abort_signalled = threading.Event()
         started = {"n": 0}
 
         def side_effect(request):
@@ -259,12 +264,23 @@ class TestAbort:
                 if started["n"] == 2:
                     both_started.set()
             both_started.wait(timeout=5)
-            release.wait(timeout=5)
             if request.model_id == "abort-me":
                 raise _Auth("denied")
+            abort_signalled.wait(timeout=5)
             return LLMResponse({"output_text": "ok"}, 0, 0)
 
         provider = FakeProvider(side_effect)
+        executor = _executor(provider, max_workers=2)
+        real_invoke = executor.invoke
+
+        def invoke(input_row, abort_event=None):
+            try:
+                return real_invoke(input_row, abort_event)
+            finally:
+                if input_row.model_id == "abort-me":
+                    abort_signalled.set()
+
+        executor.invoke = invoke
         inputs = [
             _make_input(row_id=UUID(int=0), model_id="abort-me"),
             _make_input(row_id=UUID(int=1), model_id="ok"),
@@ -275,13 +291,10 @@ class TestAbort:
 
         results: list = []
         worker = threading.Thread(
-            target=lambda: results.extend(
-                _executor(provider, max_workers=2).process_batch_iter(inputs)
-            )
+            target=lambda: results.extend(executor.process_batch_iter(inputs))
         )
         worker.start()
         assert both_started.wait(timeout=5)
-        release.set()
         worker.join(timeout=5)
 
         assert not worker.is_alive()
@@ -297,11 +310,10 @@ class TestAbort:
         # Every row reached a terminal status (the exactly-once checks above already
         # guarantee none were lost or duplicated).
         assert all(r.status in ("complete", "failed") for r in results)
-        # Rows 3 and 4 are never submitted before the abort, so they are always reported
-        # aborted. Row 2 is deliberately not asserted: depending on scheduling it may be
-        # submitted (→ complete, or aborted if cancelled before it started) or unsubmitted
-        # (→ aborted) — all fine, as long as it's yielded exactly once (checked above).
-        for i in (3, 4):
+        # Row 1 can't finish before abort_event is set, so the first completion the
+        # loop sees is row 0 with the abort already signalled: rows 2-4 are never
+        # submitted and are always reported aborted.
+        for i in (2, 3, 4):
             assert by_row[UUID(int=i)].status == "failed"
             assert by_row[UUID(int=i)].error == "Batch aborted"
 
