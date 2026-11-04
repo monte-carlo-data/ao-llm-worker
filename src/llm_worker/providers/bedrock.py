@@ -8,12 +8,18 @@ this adapter retries once internally when the configured cost-attribution
 inference-profile ARN turns out to be stale or invalid, falling back to the
 bare model id before deferring to the executor's retry loop for everything
 else.
+
+A JSON-outputs request maps to Converse's ``outputConfig.textFormat``. Converse has
+no fields for Claude's thinking and effort, so they go through
+``additionalModelRequestFields`` in the Messages API's own shape.
 """
 
+import json
 import logging
 import time
 
 import boto3
+from botocore.config import Config
 from botocore.exceptions import (
     ClientError,
     ConnectionClosedError,
@@ -29,6 +35,7 @@ from llm_worker.providers.base import (
     LLMProvider,
     LLMResponse,
     is_temperature_rejection_message,
+    json_output_result,
 )
 
 logger = logging.getLogger(__name__)
@@ -61,6 +68,10 @@ _PROFILE_ARN_ERROR_CODES = {"ResourceNotFoundException"}
 # while not repeating the doubled-call cost on every single row in between.
 _PROFILE_ARN_COOLDOWN_SECONDS = 300
 
+# botocore's default read timeout is 60s. Bedrock compiles a new JSON-outputs schema
+# on its first request, which can take about 90s.
+BEDROCK_READ_TIMEOUT_SECONDS = 120
+
 
 def _error_code(exc: ClientError) -> str:
     return exc.response.get("Error", {}).get("Code", "")
@@ -83,7 +94,9 @@ class BedrockProvider(LLMProvider):
     def __init__(self, config: BedrockConfig, boto_client=None):
         super().__init__()
         self._client = boto_client or boto3.client(
-            "bedrock-runtime", region_name=config.region
+            "bedrock-runtime",
+            region_name=config.region,
+            config=Config(read_timeout=BEDROCK_READ_TIMEOUT_SECONDS),
         )
         self._inference_profiles = config.inference_profiles
         self._profile_invalid_since: dict[str, float] = {}
@@ -109,7 +122,9 @@ class BedrockProvider(LLMProvider):
             response = self._converse(request, model, model)
         usage = response.get("usage", {})
         return LLMResponse(
-            output=_extract_output(response),
+            output=_extract_output(
+                response, json_output=request.output_format is not None
+            ),
             input_tokens=usage.get("inputTokens", 0),
             output_tokens=usage.get("outputTokens", 0),
         )
@@ -144,6 +159,7 @@ class BedrockProvider(LLMProvider):
             exception_type=ClientError,
             is_rejection=_is_temperature_rejection,
             log_event="bedrock_temperature_unsupported",
+            omit_temperature=request.thinking is not None,
         )
 
     def classify_error(self, exc: BaseException) -> ErrorDisposition:
@@ -178,7 +194,34 @@ def _build_converse_kwargs(
     }
     if request.tools:
         kwargs["toolConfig"] = _build_tool_config(request)
+    if request.output_format is not None:
+        kwargs["outputConfig"] = _build_output_config(request)
+    additional_fields: dict = {}
+    if request.thinking is not None:
+        additional_fields["thinking"] = {"type": request.thinking}
+    if request.effort is not None:
+        additional_fields["output_config"] = {"effort": request.effort}
+    if additional_fields:
+        kwargs["additionalModelRequestFields"] = additional_fields
     return kwargs
+
+
+def _build_output_config(request: ContractRequest) -> dict:
+    output_format = request.output_format
+    assert output_format is not None
+    # Converse takes the schema as a JSON string.
+    json_schema: dict = {
+        "schema": json.dumps(output_format.schema),
+        "name": output_format.name,
+    }
+    if output_format.description:
+        json_schema["description"] = output_format.description
+    return {
+        "textFormat": {
+            "type": "json_schema",
+            "structure": {"jsonSchema": json_schema},
+        }
+    }
 
 
 def _build_tool_config(request: ContractRequest) -> dict:
@@ -195,19 +238,30 @@ def _build_tool_config(request: ContractRequest) -> dict:
     return tool_config
 
 
-def _extract_output(response: dict) -> dict:
+def _extract_output(response: dict, *, json_output: bool = False) -> dict:
     output_message = response.get("output", {}).get("message", {})
     content = output_message.get("content", [])
 
-    output_text = ""
+    # Thinking arrives as ``reasoningContent`` blocks, which have no ``text`` key.
+    texts: list[str] = []
     tool_uses = []
     for block in content:
         if block.get("text"):
-            output_text += block["text"]
+            texts.append(block["text"])
         elif block.get("toolUse"):
             tool_use = block["toolUse"]
             if "input" in tool_use:
                 tool_uses.append(tool_use["input"])
+    output_text = "".join(texts)
+
+    if json_output:
+        # Converse has no ``refusal`` stop reason and no refusal category, so a
+        # refusal is recorded under whatever stop reason Converse maps it to.
+        return json_output_result(
+            output_text=output_text,
+            final_text=texts[-1] if texts else "",
+            stop_reason=response.get("stopReason"),
+        )
 
     if tool_uses:
         return {"output_text": output_text, "tool_uses": tool_uses}

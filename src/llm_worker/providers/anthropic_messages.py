@@ -16,6 +16,9 @@ v1 shape verbatim — so tool translation here is near-passthrough. Most Claude
 models accept ``temperature=0``, but some (e.g. Opus 4.8 on Foundry) reject a
 custom temperature outright — so this adapter learns, per model, to drop it and
 retry (see :meth:`AnthropicMessagesProvider.complete`).
+
+A JSON-outputs request maps to ``output_config.format``, thinking to ``thinking``,
+and effort to ``output_config.effort``.
 """
 
 from anthropic import (
@@ -34,6 +37,7 @@ from llm_worker.providers.base import (
     LLMProvider,
     LLMResponse,
     is_temperature_rejection_message,
+    json_output_result,
 )
 
 
@@ -54,8 +58,9 @@ class AnthropicMessagesProvider(LLMProvider):
             exception_type=BadRequestError,
             is_rejection=_is_temperature_rejection,
             log_event="anthropic_temperature_unsupported",
+            omit_temperature=request.thinking is not None,
         )
-        return _to_llm_response(response)
+        return _to_llm_response(response, request)
 
     def classify_error(self, exc: BaseException) -> ErrorDisposition:
         if isinstance(
@@ -93,21 +98,43 @@ def _build_kwargs(
         ]
         if request.forced_tool:
             kwargs["tool_choice"] = {"type": "tool", "name": request.forced_tool}
+    output_config: dict = {}
+    if request.output_format is not None:
+        # The Messages API takes only the schema; name and description are for Bedrock.
+        output_config["format"] = {
+            "type": "json_schema",
+            "schema": request.output_format.schema,
+        }
+    if request.effort is not None:
+        output_config["effort"] = request.effort
+    if output_config:
+        kwargs["output_config"] = output_config
+    if request.thinking is not None:
+        kwargs["thinking"] = {"type": request.thinking}
     return kwargs
 
 
-def _to_llm_response(response) -> LLMResponse:
-    output_text = ""
+def _to_llm_response(response, request: ContractRequest) -> LLMResponse:
+    texts: list[str] = []
     tool_uses = []
     for block in response.content:
         if block.type == "text":
-            output_text += block.text
+            texts.append(block.text)
         elif block.type == "tool_use":
             tool_uses.append(block.input)
+    output_text = "".join(texts)
 
-    output: dict = {"output_text": output_text}
-    if tool_uses:
-        output["tool_uses"] = tool_uses
+    if request.output_format is not None:
+        output = json_output_result(
+            output_text=output_text,
+            final_text=texts[-1] if texts else "",
+            stop_reason=getattr(response, "stop_reason", None),
+            refusal_category=_refusal_category(response),
+        )
+    else:
+        output: dict = {"output_text": output_text}
+        if tool_uses:
+            output["tool_uses"] = tool_uses
 
     usage = response.usage
     return LLMResponse(
@@ -115,3 +142,8 @@ def _to_llm_response(response) -> LLMResponse:
         input_tokens=usage.input_tokens if usage else 0,
         output_tokens=usage.output_tokens if usage else 0,
     )
+
+
+def _refusal_category(response) -> str | None:
+    stop_details = getattr(response, "stop_details", None)
+    return getattr(stop_details, "category", None) if stop_details else None

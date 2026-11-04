@@ -1,5 +1,6 @@
 """Provider-agnostic interface for LLM backends."""
 
+import json
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import Callable
@@ -32,6 +33,43 @@ def is_temperature_rejection_message(message: str) -> bool:
     return "temperature" in low and any(
         keyword in low for keyword in _TEMPERATURE_REJECTION_KEYWORDS
     )
+
+
+def json_output_result(
+    *,
+    output_text: str,
+    final_text: str,
+    stop_reason: str | None,
+    refusal_category: str | None = None,
+) -> dict:
+    """The ``llm_results.response`` envelope for a JSON-outputs request.
+
+    A reply that parses as a JSON object is stored as ``tool_uses[0]``, where a
+    forced tool call's input goes. Any other reply still completes the row, without
+    ``tool_uses``, and records why: the stop reason, the refusal category when the
+    backend gives one, and ``result_error`` when the text isn't a JSON object. A
+    refusal or a token-cap stop isn't an API error, so it never fails the row; the
+    monolith drops rows without a result.
+
+    Args:
+        output_text: All text blocks of the reply, joined.
+        final_text: The last text block, which holds the JSON. Thinking blocks are
+            never text blocks, so they're skipped by construction.
+    """
+    output: dict = {"output_text": output_text}
+    if stop_reason != "refusal":
+        try:
+            parsed = json.loads(final_text)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, dict):
+            output["tool_uses"] = [parsed]
+            return output
+        output["result_error"] = "reply is not a JSON object"
+    output["stop_reason"] = stop_reason or ""
+    if refusal_category:
+        output["refusal_category"] = refusal_category
+    return output
 
 
 @dataclass
@@ -96,6 +134,7 @@ class LLMProvider(ABC):
         exception_type: type[ExcT],
         is_rejection: Callable[[ExcT], bool],
         log_event: str,
+        omit_temperature: bool = False,
     ) -> T:
         """Shared "try with temperature, learn and retry once without it" state
         machine used by both the Bedrock and Anthropic Messages adapters.
@@ -108,7 +147,13 @@ class LLMProvider(ABC):
         out-of-range validation error) — in which case the model is learned
         into ``self._omit_temperature`` and ``call`` is retried once, without
         temperature.
+
+        ``omit_temperature`` skips temperature for this request without a first
+        attempt. Requests with thinking set it: models that think reject a custom
+        temperature, and their error message may not match ``is_rejection``.
         """
+        if omit_temperature:
+            return call(False)
         include_temperature = model not in self._omit_temperature
         try:
             return call(include_temperature)

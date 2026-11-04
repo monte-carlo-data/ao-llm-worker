@@ -11,6 +11,11 @@ handing it to a provider adapter, so adapters only ever see v1. Dispatch is by
 **payload-shape sniff** (a v0 row is recognized by its `toolSpec`/`maxTokens`
 spellings), not a `contract_version` column — so the worker depends on no schema
 change and reads v0 and v1 rows interchangeably during the migration.
+
+Some models reject a forced tool call. For those, the monolith sends
+``tool_config = {"output_format": {...}}`` instead of tools: the model replies with
+JSON that matches the schema. ``params`` can also carry ``thinking`` and ``effort``.
+All three are optional, so rows without them parse exactly as before.
 """
 
 from dataclasses import dataclass
@@ -28,8 +33,26 @@ class Tool:
 
 
 @dataclass
+class OutputFormat:
+    """A JSON schema the model's reply must match (JSON outputs)."""
+
+    name: str
+    description: str
+    schema: dict
+
+
+@dataclass
 class ContractRequest:
-    """A normalized v1 request. Adapters translate this to their backend."""
+    """A normalized v1 request. Adapters translate this to their backend.
+
+    Attributes:
+        output_format: Ask for a JSON reply that matches this schema. The adapter
+            stores the parsed reply as ``tool_uses[0]``, where a forced tool call's
+            input goes, so readers of the result don't change.
+        thinking: The thinking type to send, such as ``adaptive``. When set, no
+            temperature is sent, because models that think reject one.
+        effort: The effort level to send. ``None`` leaves the model's default.
+    """
 
     model_id: str
     prompt: str
@@ -37,6 +60,9 @@ class ContractRequest:
     temperature: float
     tools: list[Tool]
     forced_tool: str | None  # tool name to force, or None for auto / no tools
+    output_format: OutputFormat | None = None
+    thinking: str | None = None
+    effort: str | None = None
 
 
 def resolve_model_ref(model_id: str) -> str:
@@ -69,6 +95,9 @@ def build_request(
         temperature=temperature,
         tools=tools,
         forced_tool=forced_tool,
+        output_format=_normalize_output_format(tool_config),
+        thinking=_optional_str(params, "thinking"),
+        effort=_optional_str(params, "effort"),
     )
 
 
@@ -80,6 +109,36 @@ def _normalize_tools(tool_config: dict) -> tuple[list[Tool], str | None]:
         tool_config.get("tool_choice", tool_config.get("toolChoice"))
     )
     return tools, forced_tool
+
+
+def _normalize_output_format(tool_config: dict) -> OutputFormat | None:
+    output_format = (tool_config or {}).get("output_format")
+    if output_format is None:
+        return None
+    if output_format.get("type") != "json_schema":
+        raise ValueError(
+            f"output_format type must be 'json_schema', got {output_format.get('type')!r}"
+        )
+    schema = output_format.get("schema")
+    if not isinstance(schema, dict):
+        raise ValueError("output_format missing required 'schema' object")
+    name = output_format.get("name")
+    if not name:
+        raise ValueError("output_format missing required 'name'")
+    return OutputFormat(
+        name=name,
+        description=output_format.get("description", ""),
+        schema=schema,
+    )
+
+
+def _optional_str(params: dict, key: str) -> str | None:
+    value = params.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"params.{key} must be a non-empty string, got {value!r}")
+    return value
 
 
 def _normalize_tool(tool: dict) -> Tool:

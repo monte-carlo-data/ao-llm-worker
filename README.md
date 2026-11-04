@@ -19,12 +19,47 @@ can safely recover from crashes mid-batch. An auth/permission failure from the
 provider triggers a batch-level abort to avoid burning retries on every remaining
 row.
 
-On startup the worker publishes its `(cloud, provider)` to the
-`otel_traces.llm_worker_info` table. This is a **cross-service contract**: the
-monolith reads that marker to resolve which cloud-native Claude model pool a
-deployment uses (`aws`→bedrock, `gcp`→vertex, `azure`→foundry) when a batch's
-rows carry no explicit model. The write is best-effort — a failure is logged and
-never blocks batch processing.
+On startup the worker publishes its `(cloud, provider, capabilities)` to the
+`otel_traces.llm_worker_info` table. This is a **cross-service contract**:
+
+- The monolith reads the cloud to resolve which cloud-native Claude model pool a
+  deployment uses (`aws`→bedrock, `gcp`→vertex, `azure`→foundry) when a batch's
+  rows carry no explicit model.
+- The monolith reads `capabilities` to decide which models it can offer. This
+  worker lists `output_format`, `thinking` and `effort` (see
+  [Request profiles](#request-profiles)).
+
+The write is best-effort — a failure is logged and never blocks batch processing.
+On an older chart without the `capabilities` column, the worker writes the cloud
+and provider only, then retries the full write every 10 minutes until it succeeds
+once.
+
+### Request profiles
+
+Some models, such as Claude Sonnet 5.5 and Opus 5.5, reject a forced tool call.
+For them the monolith sends a different request:
+
+| Column        | Key                 | Meaning                                                                 |
+| ------------- | ------------------- | ----------------------------------------------------------------------- |
+| `tool_config` | `output_format`     | `{"type": "json_schema", "name", "description", "schema"}`, instead of `tools` and `tool_choice` |
+| `params`      | `thinking`          | Thinking type, such as `adaptive`                                       |
+| `params`      | `effort`            | Optional effort level                                                   |
+
+The worker maps them to each backend:
+
+- **Vertex, Foundry:** `output_config.format` (schema only), `thinking`, and
+  `output_config.effort`.
+- **Bedrock:** Converse `outputConfig.textFormat`, with the schema as a JSON
+  string. Thinking and effort go in `additionalModelRequestFields`.
+
+A request with `thinking` never sends a temperature. The JSON reply is stored as
+`tool_uses[0]`, where a forced tool call's input goes. A refusal, a token-cap stop
+or a reply that isn't a JSON object still completes the row, without `tool_uses`.
+The response records `stop_reason`, plus `refusal_category` or `result_error`
+when they apply. Only API errors fail a row.
+
+The Bedrock client waits up to 120 seconds for a reply. Bedrock compiles a new
+schema on its first request, which can take about 90 seconds.
 
 On the `bedrock` provider, a `converse()` call resolves through a
 cost-attribution inference profile ARN when `BEDROCK_INFERENCE_PROFILES` maps

@@ -11,6 +11,10 @@ from llm_worker.config import ClickHouseConfig
 
 logger = logging.getLogger(__name__)
 
+# Request features this worker supports, published in llm_worker_info. The monolith
+# offers a model whose request needs one of them only when the worker lists it.
+WORKER_CAPABILITIES = ("output_format", "thinking", "effort")
+
 
 @dataclass
 class LLMInput:
@@ -56,19 +60,60 @@ class ClickHouseClient:
         else:
             raise ValueError("Either config or client must be provided")
 
-    def write_worker_info(self, cloud: str, provider: str) -> None:
-        """Publish this worker's cloud + provider so the monolith can resolve
-        the deployment's cloud-native model pool. The table defaults updated_at
-        to now(); a ReplacingMergeTree keyed on (cloud, provider) keeps a single
-        current row, so re-publishing on every startup is cheap and idempotent.
+    def write_worker_info(self, cloud: str, provider: str) -> bool:
+        """Publish this worker's cloud, provider and capabilities.
+
+        The monolith reads the cloud to pick the deployment's cloud-native model
+        pool, and the capabilities to decide which models it can offer. The table
+        defaults updated_at to now(); a ReplacingMergeTree keyed on (cloud, provider)
+        keeps a single current row, so re-publishing is cheap and idempotent.
+
+        Returns:
+            False when the table has no ``capabilities`` column yet (an older
+            chart), so only the cloud and provider were written. The caller
+            retries later to publish the capabilities.
         """
+        if self._has_capabilities_column():
+            self._client.insert(
+                "llm_worker_info",
+                [[cloud, provider, list(WORKER_CAPABILITIES)]],
+                column_names=["cloud", "provider", "capabilities"],
+                settings={"async_insert": 0},
+            )
+            logger.info(
+                "worker_info_written",
+                extra={
+                    "cloud": cloud,
+                    "provider": provider,
+                    "capabilities": list(WORKER_CAPABILITIES),
+                },
+            )
+            return True
         self._client.insert(
             "llm_worker_info",
             [[cloud, provider]],
             column_names=["cloud", "provider"],
             settings={"async_insert": 0},
         )
-        logger.info("worker_info_written", extra={"cloud": cloud, "provider": provider})
+        logger.warning(
+            "worker_info_written_without_capabilities",
+            extra={"cloud": cloud, "provider": provider},
+        )
+        return False
+
+    def _has_capabilities_column(self) -> bool:
+        # Checked up front, not by parsing an insert error: the chart's schema Job
+        # and the worker roll out together, so the column can still be missing.
+        result = self._client.query(
+            """
+            SELECT count()
+            FROM system.columns
+            WHERE database = currentDatabase()
+              AND table = 'llm_worker_info'
+              AND name = 'capabilities'
+        """
+        )
+        return result.result_rows[0][0] > 0
 
     def get_pending_batches(self) -> list[UUID]:
         result = self._client.query(

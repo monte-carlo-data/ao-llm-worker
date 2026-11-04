@@ -1,10 +1,11 @@
+import json
 import time
 
 import pytest
 from botocore.exceptions import ClientError, EndpointConnectionError
 
 from llm_worker.config import BedrockConfig
-from llm_worker.contract import ContractRequest, Tool
+from llm_worker.contract import ContractRequest, OutputFormat, Tool
 from llm_worker.providers.base import ErrorDisposition
 from llm_worker.providers.bedrock import (
     NON_RETRYABLE_ERROR_CODES,
@@ -533,3 +534,121 @@ class TestClassifyError:
     def test_generic_exception_fails_row(self, mocker):
         provider = _provider(mocker.Mock())
         assert provider.classify_error(Exception("boom")) == ErrorDisposition.FAIL_ROW
+
+
+_SCHEMA = {
+    "type": "object",
+    "properties": {"score": {"type": "number"}},
+    "required": ["score"],
+    "additionalProperties": False,
+}
+
+
+def _profiled_req(*, description="Return the result", thinking="adaptive", effort=None):
+    return ContractRequest(
+        model_id="us.anthropic.claude-sonnet-5-5",
+        prompt="judge this",
+        max_output_tokens=4012,
+        temperature=0.0,
+        tools=[],
+        forced_tool=None,
+        output_format=OutputFormat("evaluation_result", description, _SCHEMA),
+        thinking=thinking,
+        effort=effort,
+    )
+
+
+def _json_response(text, stop_reason="end_turn", reasoning=True):
+    content = []
+    if reasoning:
+        content.append({"reasoningContent": {"reasoningText": {"text": "thinking"}}})
+    content.append({"text": text})
+    return {"output": {"message": {"content": content}}, "stopReason": stop_reason}
+
+
+class TestRequestProfiles:
+    def test_maps_json_outputs_to_output_config(self):
+        kw = _build_converse_kwargs(_profiled_req())
+
+        assert kw["outputConfig"] == {
+            "textFormat": {
+                "type": "json_schema",
+                "structure": {
+                    "jsonSchema": {
+                        "schema": json.dumps(_SCHEMA),
+                        "name": "evaluation_result",
+                        "description": "Return the result",
+                    }
+                },
+            }
+        }
+        assert "toolConfig" not in kw
+
+    def test_omits_an_empty_schema_description(self):
+        kw = _build_converse_kwargs(_profiled_req(description=""))
+        json_schema = kw["outputConfig"]["textFormat"]["structure"]["jsonSchema"]
+        assert "description" not in json_schema
+
+    def test_sends_thinking_and_effort_as_additional_fields(self):
+        kw = _build_converse_kwargs(_profiled_req(effort="medium"))
+        assert kw["additionalModelRequestFields"] == {
+            "thinking": {"type": "adaptive"},
+            "output_config": {"effort": "medium"},
+        }
+
+    def test_sends_no_effort_when_unset(self):
+        kw = _build_converse_kwargs(_profiled_req())
+        assert kw["additionalModelRequestFields"] == {"thinking": {"type": "adaptive"}}
+
+    def test_existing_requests_send_no_new_fields(self):
+        kw = _build_converse_kwargs(_req())
+        assert "outputConfig" not in kw
+        assert "additionalModelRequestFields" not in kw
+
+    def test_sends_no_temperature_with_thinking(self, mocker):
+        client = mocker.Mock()
+        client.converse.return_value = _json_response('{"score": 2}')
+
+        _provider(client).complete(_profiled_req())
+
+        client.converse.assert_called_once()
+        assert "temperature" not in client.converse.call_args.kwargs["inferenceConfig"]
+
+    def test_stores_the_json_reply_as_the_tool_input(self, mocker):
+        client = mocker.Mock()
+        client.converse.return_value = _json_response('{"score": 2}')
+
+        response = _provider(client).complete(_profiled_req())
+
+        assert response.output == {
+            "output_text": '{"score": 2}',
+            "tool_uses": [{"score": 2}],
+        }
+
+    def test_records_a_token_cap_stop_without_a_result(self):
+        output = _extract_output(
+            _json_response('{"score": ', stop_reason="max_tokens"), json_output=True
+        )
+        assert output == {
+            "output_text": '{"score": ',
+            "result_error": "reply is not a JSON object",
+            "stop_reason": "max_tokens",
+        }
+
+    def test_records_a_reply_without_text(self):
+        response = {
+            "output": {"message": {"content": []}},
+            "stopReason": "content_filtered",
+        }
+        output = _extract_output(response, json_output=True)
+        assert "tool_uses" not in output
+        assert output["stop_reason"] == "content_filtered"
+
+
+def test_client_waits_at_least_120_seconds_for_a_reply(mocker):
+    boto_client = mocker.patch("llm_worker.providers.bedrock.boto3.client")
+
+    BedrockProvider(BedrockConfig(region="us-east-1", inference_profiles={}))
+
+    config = boto_client.call_args.kwargs["config"]
+    assert config.read_timeout >= 120

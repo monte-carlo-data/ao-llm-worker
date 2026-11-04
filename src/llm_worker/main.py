@@ -28,22 +28,43 @@ logger = logging.getLogger(__name__)
 RESULT_WRITE_BATCH_SIZE = 50
 RESULT_WRITE_MAX_ATTEMPTS = 3
 BATCH_STATUS_WRITE_MAX_ATTEMPTS = 3
+# How often the loop retries publishing the worker's capabilities after a startup
+# write that couldn't include them.
+WORKER_INFO_RETRY_SECONDS = 600
 
 
 class LLMWorkerService:
     def __init__(
-        self, ch: ClickHouseClient, executor: BatchExecutor, poll_interval: float
+        self,
+        ch: ClickHouseClient,
+        executor: BatchExecutor,
+        poll_interval: float,
+        *,
+        worker_info: tuple[str, str] | None = None,
+        capabilities_published: bool = True,
     ):
+        """
+        Args:
+            worker_info: This worker's ``(cloud, provider)``, used to retry
+                publishing its capabilities.
+            capabilities_published: False when the startup write didn't include
+                the capabilities. The loop then retries every
+                ``WORKER_INFO_RETRY_SECONDS`` until one write includes them.
+        """
         self._ch = ch
         self._executor = executor
         self._poll_interval = poll_interval
         self._should_stop = False
+        self._worker_info = worker_info
+        self._capabilities_published = capabilities_published or worker_info is None
+        self._worker_info_attempted_at = time.monotonic()
 
     def run(self) -> None:
         self._install_signal_handlers()
         logger.info("worker_started", extra={"poll_interval": self._poll_interval})
 
         while not self._should_stop:
+            self._retry_publish_capabilities()
             try:
                 batch_ids = self._ch.get_pending_batches()
                 if batch_ids:
@@ -59,6 +80,23 @@ class LLMWorkerService:
                     time.sleep(self._poll_interval)
 
         logger.info("worker_stopped")
+
+    def _retry_publish_capabilities(self) -> None:
+        # The chart's schema Job and the worker roll out together, so the worker can
+        # start before the capabilities column exists. Best-effort: a failure here
+        # never stops batch processing.
+        if self._capabilities_published or self._worker_info is None:
+            return
+        now = time.monotonic()
+        if now - self._worker_info_attempted_at < WORKER_INFO_RETRY_SECONDS:
+            return
+        self._worker_info_attempted_at = now
+        try:
+            self._capabilities_published = self._ch.write_worker_info(
+                *self._worker_info
+            )
+        except Exception as exc:  # noqa: BLE001 — best-effort metadata write
+            logger.warning("worker_info_write_failed", extra={"error": str(exc)})
 
     def process_single_batch(self, batch_id: UUID) -> None:
         saw_rows = False
@@ -207,16 +245,24 @@ def run():
         config.retry_max_attempts,
         config.retry_max_backoff,
     )
-    # Best-effort: publish this worker's cloud/provider for the monolith's
-    # cloud-native model resolution. Non-critical metadata — a failure here
-    # (e.g. the llm_worker_info table not yet migrated) must not stop batch
-    # processing, so log and continue.
+    # Best-effort: publish this worker's cloud, provider and capabilities for the
+    # monolith. Non-critical metadata — a failure here (e.g. the llm_worker_info
+    # table not yet migrated) must not stop batch processing, so log and continue.
+    # The service loop retries until the capabilities are published.
+    worker_info = (provider_config.cloud, provider_config.provider)
+    capabilities_published = False
     try:
-        ch.write_worker_info(provider_config.cloud, provider_config.provider)
+        capabilities_published = ch.write_worker_info(*worker_info)
     except Exception as exc:  # noqa: BLE001 — best-effort metadata write must never block startup
         logger.warning("worker_info_write_failed", extra={"error": str(exc)})
 
-    service = LLMWorkerService(ch, executor, config.poll_interval)
+    service = LLMWorkerService(
+        ch,
+        executor,
+        config.poll_interval,
+        worker_info=worker_info,
+        capabilities_published=capabilities_published,
+    )
     service.run()
 
 
