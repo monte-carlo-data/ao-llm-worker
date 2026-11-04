@@ -36,13 +36,16 @@ from llm_worker.providers.base import (
     ErrorDisposition,
     LLMProvider,
     LLMResponse,
+    build_output,
     is_temperature_rejection_message,
-    json_output_result,
+    omits_temperature,
 )
 
 
 class AnthropicMessagesProvider(LLMProvider):
     """Base adapter for backends that speak the Anthropic Messages API."""
+
+    capabilities = ("output_format", "thinking", "effort")
 
     def __init__(self, client):
         super().__init__()
@@ -58,7 +61,7 @@ class AnthropicMessagesProvider(LLMProvider):
             exception_type=BadRequestError,
             is_rejection=_is_temperature_rejection,
             log_event="anthropic_temperature_unsupported",
-            omit_temperature=request.thinking is not None,
+            omit_temperature=omits_temperature(request),
         )
         return _to_llm_response(response, request)
 
@@ -122,19 +125,13 @@ def _to_llm_response(response, request: ContractRequest) -> LLMResponse:
             texts.append(block.text)
         elif block.type == "tool_use":
             tool_uses.append(block.input)
-    output_text = "".join(texts)
-
-    if request.output_format is not None:
-        output = json_output_result(
-            output_text=output_text,
-            final_text=texts[-1] if texts else "",
-            stop_reason=getattr(response, "stop_reason", None),
-            refusal_category=_refusal_category(response),
-        )
-    else:
-        output: dict = {"output_text": output_text}
-        if tool_uses:
-            output["tool_uses"] = tool_uses
+    output = build_output(
+        texts,
+        tool_uses,
+        json_output=request.output_format is not None,
+        stop_reason=getattr(response, "stop_reason", None),
+        refusal_category=_refusal_category(response),
+    )
 
     usage = response.usage
     return LLMResponse(

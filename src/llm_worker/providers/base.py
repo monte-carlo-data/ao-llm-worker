@@ -35,31 +35,39 @@ def is_temperature_rejection_message(message: str) -> bool:
     )
 
 
-def json_output_result(
+def build_output(
+    texts: list[str],
+    tool_uses: list[dict],
     *,
-    output_text: str,
-    final_text: str,
-    stop_reason: str | None,
+    json_output: bool,
+    stop_reason: str | None = None,
     refusal_category: str | None = None,
 ) -> dict:
-    """The ``llm_results.response`` envelope for a JSON-outputs request.
+    """The ``llm_results.response`` envelope for a reply.
 
-    A reply that parses as a JSON object is stored as ``tool_uses[0]``, where a
-    forced tool call's input goes. Any other reply still completes the row, without
-    ``tool_uses``, and records why: the stop reason, the refusal category when the
-    backend gives one, and ``result_error`` when the text isn't a JSON object. A
-    refusal or a token-cap stop isn't an API error, so it never fails the row; the
-    monolith drops rows without a result.
+    ``output_text`` joins the text blocks. Without JSON outputs, ``tool_uses`` holds
+    the tool calls' inputs and is omitted when empty.
+
+    With JSON outputs, the last text block holds the JSON. A reply that parses as a
+    JSON object is stored as ``tool_uses[0]``, where a forced tool call's input goes.
+    Any other reply still completes the row, without ``tool_uses``, and records why:
+    the stop reason, the refusal category when the backend gives one, and
+    ``result_error`` when the text isn't a JSON object. A refusal or a token-cap stop
+    isn't an API error, so it never fails the row; the monolith drops rows without a
+    result.
 
     Args:
-        output_text: All text blocks of the reply, joined.
-        final_text: The last text block, which holds the JSON. Thinking blocks are
-            never text blocks, so they're skipped by construction.
+        texts: The reply's text blocks in order. Thinking blocks aren't text
+            blocks, so callers leave them out.
     """
-    output: dict = {"output_text": output_text}
+    output: dict = {"output_text": "".join(texts)}
+    if not json_output:
+        if tool_uses:
+            output["tool_uses"] = tool_uses
+        return output
     if stop_reason != "refusal":
         try:
-            parsed = json.loads(final_text)
+            parsed = json.loads(texts[-1]) if texts else None
         except ValueError:
             parsed = None
         if isinstance(parsed, dict):
@@ -102,6 +110,10 @@ class LLMProvider(ABC):
     classifies its native exceptions. Retry, concurrency, abort handling, and
     result mapping are owned by the executor — not the provider.
     """
+
+    # Request features this provider supports, published in llm_worker_info. The
+    # monolith offers a model whose request needs one only when it's listed.
+    capabilities: tuple[str, ...] = ()
 
     def __init__(self) -> None:
         # Resolved model refs learned to reject a custom temperature. Per-model,
@@ -149,8 +161,9 @@ class LLMProvider(ABC):
         temperature.
 
         ``omit_temperature`` skips temperature for this request without a first
-        attempt. Requests with thinking set it: models that think reject a custom
-        temperature, and their error message may not match ``is_rejection``.
+        attempt. Requests with thinking or JSON outputs set it: the models that need
+        them reject a custom temperature, and their error message may not match
+        ``is_rejection``.
         """
         if omit_temperature:
             return call(False)
@@ -165,3 +178,8 @@ class LLMProvider(ABC):
             logger.warning(log_event, extra={"model": model})
             self._omit_temperature.add(model)
             return call(False)
+
+
+def omits_temperature(request: ContractRequest) -> bool:
+    """Whether a request is for a model that rejects a custom temperature."""
+    return request.thinking is not None or request.output_format is not None

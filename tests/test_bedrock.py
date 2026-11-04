@@ -645,10 +645,25 @@ class TestRequestProfiles:
         assert output["stop_reason"] == "content_filtered"
 
 
-def test_client_waits_at_least_120_seconds_for_a_reply(mocker):
+def test_client_waits_120_seconds_and_leaves_retries_to_the_executor(mocker):
     boto_client = mocker.patch("llm_worker.providers.bedrock.boto3.client")
 
     BedrockProvider(BedrockConfig(region="us-east-1", inference_profiles={}))
 
     config = boto_client.call_args.kwargs["config"]
     assert config.read_timeout >= 120
+    assert config.retries == {"total_max_attempts": 1}
+
+
+def test_publishes_no_effort_capability_until_it_is_tested_on_dev():
+    assert BedrockProvider.capabilities == ("output_format", "thinking")
+
+
+def test_json_outputs_alone_send_no_temperature(mocker):
+    client = mocker.Mock()
+    client.converse.return_value = _json_response('{"score": 2}', reasoning=False)
+
+    _provider(client).complete(_profiled_req(thinking=None))
+
+    client.converse.assert_called_once()
+    assert "temperature" not in client.converse.call_args.kwargs["inferenceConfig"]

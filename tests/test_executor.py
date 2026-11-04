@@ -379,3 +379,54 @@ class TestProcessBatch:
         worker.join(timeout=1)
 
         assert peak <= 2
+
+
+_OUTPUT_FORMAT = {
+    "type": "json_schema",
+    "name": "evaluation_result",
+    "schema": {"type": "object", "properties": {}, "additionalProperties": False},
+}
+_TOOL = {"name": "evaluation_result", "description": "d", "input_schema": {}}
+
+
+class TestInvalidRequestProfileCombinations:
+    """build_request rejects these with ValueError, and the executor fails only that
+    row with the message, without calling the provider or crashing the batch."""
+
+    def test_output_format_with_tools_fails_the_row(self):
+        provider = FakeProvider()
+        row = _make_input(
+            tool_config=json.dumps({"output_format": _OUTPUT_FORMAT, "tools": [_TOOL]})
+        )
+
+        result = _executor(provider).invoke(row)
+
+        assert result.status == "failed"
+        assert "both output_format and tools" in result.error
+        assert provider.calls == 0
+
+    def test_thinking_with_a_forced_tool_fails_the_row(self):
+        provider = FakeProvider()
+        row = _make_input(
+            params=json.dumps({"thinking": "adaptive"}),
+            tool_config=json.dumps(
+                {"tools": [_TOOL], "tool_choice": {"name": "evaluation_result"}}
+            ),
+        )
+
+        result = _executor(provider).invoke(row)
+
+        assert result.status == "failed"
+        assert "forced tool choice" in result.error
+        assert provider.calls == 0
+
+    def test_other_rows_in_the_batch_still_complete(self):
+        provider = FakeProvider()
+        bad = _make_input(
+            row_id=UUID("00000000-0000-0000-0000-000000000012"),
+            tool_config=json.dumps({"output_format": _OUTPUT_FORMAT, "tools": [_TOOL]}),
+        )
+
+        results = list(_executor(provider).process_batch_iter([bad, _make_input()]))
+
+        assert sorted(r.status for r in results) == ["complete", "failed"]

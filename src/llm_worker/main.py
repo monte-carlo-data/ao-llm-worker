@@ -5,6 +5,7 @@ import os
 import signal
 import time
 from collections.abc import Iterable
+from dataclasses import dataclass
 from types import FrameType
 from uuid import UUID
 
@@ -28,9 +29,19 @@ logger = logging.getLogger(__name__)
 RESULT_WRITE_BATCH_SIZE = 50
 RESULT_WRITE_MAX_ATTEMPTS = 3
 BATCH_STATUS_WRITE_MAX_ATTEMPTS = 3
-# How often the loop retries publishing the worker's capabilities after a startup
-# write that couldn't include them.
-WORKER_INFO_RETRY_SECONDS = 600
+# How often the worker republishes its cloud, provider and capabilities. The chart's
+# schema Job and the worker roll out together, so the capabilities column can appear
+# after startup; republishing picks it up without a restart.
+WORKER_INFO_REPUBLISH_SECONDS = 600
+
+
+@dataclass(frozen=True)
+class WorkerInfo:
+    """What the worker publishes to llm_worker_info."""
+
+    cloud: str
+    provider: str
+    capabilities: tuple[str, ...]
 
 
 class LLMWorkerService:
@@ -40,31 +51,21 @@ class LLMWorkerService:
         executor: BatchExecutor,
         poll_interval: float,
         *,
-        worker_info: tuple[str, str] | None = None,
-        capabilities_published: bool = True,
+        worker_info: WorkerInfo,
     ):
-        """
-        Args:
-            worker_info: This worker's ``(cloud, provider)``, used to retry
-                publishing its capabilities.
-            capabilities_published: False when the startup write didn't include
-                the capabilities. The loop then retries every
-                ``WORKER_INFO_RETRY_SECONDS`` until one write includes them.
-        """
         self._ch = ch
         self._executor = executor
         self._poll_interval = poll_interval
         self._should_stop = False
         self._worker_info = worker_info
-        self._capabilities_published = capabilities_published or worker_info is None
-        self._worker_info_attempted_at = time.monotonic()
+        self._worker_info_attempted_at: float | None = None
 
     def run(self) -> None:
         self._install_signal_handlers()
         logger.info("worker_started", extra={"poll_interval": self._poll_interval})
 
         while not self._should_stop:
-            self._retry_publish_capabilities()
+            self._maybe_publish_worker_info()
             try:
                 batch_ids = self._ch.get_pending_batches()
                 if batch_ids:
@@ -81,20 +82,24 @@ class LLMWorkerService:
 
         logger.info("worker_stopped")
 
-    def _retry_publish_capabilities(self) -> None:
-        # The chart's schema Job and the worker roll out together, so the worker can
-        # start before the capabilities column exists. Best-effort: a failure here
-        # never stops batch processing.
-        if self._capabilities_published or self._worker_info is None:
-            return
+    def _maybe_publish_worker_info(self) -> None:
+        """Publish the worker info at startup, then every WORKER_INFO_REPUBLISH_SECONDS.
+
+        Called from the poll loop and between pages of a batch, so a long backlog
+        can't delay it. Best-effort: a failure is logged and never stops batch
+        processing.
+        """
         now = time.monotonic()
-        if now - self._worker_info_attempted_at < WORKER_INFO_RETRY_SECONDS:
+        attempted_at = self._worker_info_attempted_at
+        if (
+            attempted_at is not None
+            and now - attempted_at < WORKER_INFO_REPUBLISH_SECONDS
+        ):
             return
         self._worker_info_attempted_at = now
+        info = self._worker_info
         try:
-            self._capabilities_published = self._ch.write_worker_info(
-                *self._worker_info
-            )
+            self._ch.write_worker_info(info.cloud, info.provider, info.capabilities)
         except Exception as exc:  # noqa: BLE001 — best-effort metadata write
             logger.warning("worker_info_write_failed", extra={"error": str(exc)})
 
@@ -115,6 +120,7 @@ class LLMWorkerService:
                 extra={"batch_id": str(batch_id), "rows": len(rows)},
             )
             self._write_results_in_chunks(self._executor.process_batch_iter(rows))
+            self._maybe_publish_worker_info()
 
         if not saw_rows:
             total_rows, total_completed, total_failed = self._ch.get_batch_counts(
@@ -245,23 +251,16 @@ def run():
         config.retry_max_attempts,
         config.retry_max_backoff,
     )
-    # Best-effort: publish this worker's cloud, provider and capabilities for the
-    # monolith. Non-critical metadata — a failure here (e.g. the llm_worker_info
-    # table not yet migrated) must not stop batch processing, so log and continue.
-    # The service loop retries until the capabilities are published.
-    worker_info = (provider_config.cloud, provider_config.provider)
-    capabilities_published = False
-    try:
-        capabilities_published = ch.write_worker_info(*worker_info)
-    except Exception as exc:  # noqa: BLE001 — best-effort metadata write must never block startup
-        logger.warning("worker_info_write_failed", extra={"error": str(exc)})
-
+    # The service publishes the worker info at startup and then periodically.
     service = LLMWorkerService(
         ch,
         executor,
         config.poll_interval,
-        worker_info=worker_info,
-        capabilities_published=capabilities_published,
+        worker_info=WorkerInfo(
+            cloud=provider_config.cloud,
+            provider=provider_config.provider,
+            capabilities=provider.capabilities,
+        ),
     )
     service.run()
 

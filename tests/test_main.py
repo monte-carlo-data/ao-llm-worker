@@ -1,17 +1,23 @@
 import signal
 import time
-from unittest.mock import ANY, MagicMock
+from unittest.mock import MagicMock
 from uuid import UUID
 
 import pytest
 from clickhouse_connect.driver.exceptions import ClickHouseError
 
 from llm_worker.clickhouse import LLMResult
-from llm_worker.main import WORKER_INFO_RETRY_SECONDS, LLMWorkerService, run
+from llm_worker.main import (
+    WORKER_INFO_REPUBLISH_SECONDS,
+    LLMWorkerService,
+    WorkerInfo,
+    run,
+)
 
 BATCH_1 = UUID("00000000-0000-0000-0000-000000000001")
 BATCH_2 = UUID("00000000-0000-0000-0000-000000000002")
 BATCH_3 = UUID("00000000-0000-0000-0000-000000000003")
+WORKER_INFO = WorkerInfo("aws", "bedrock", ("output_format", "thinking"))
 
 
 def _make_service(ch_mock=None, executor_mock=None, poll_interval: float = 1):
@@ -19,7 +25,7 @@ def _make_service(ch_mock=None, executor_mock=None, poll_interval: float = 1):
     executor = executor_mock or MagicMock()
     if not hasattr(executor, "process_batch_iter"):
         executor.process_batch_iter = MagicMock(return_value=iter(()))
-    return LLMWorkerService(ch, executor, poll_interval)
+    return LLMWorkerService(ch, executor, poll_interval, worker_info=WORKER_INFO)
 
 
 class TestSignalHandling:
@@ -381,149 +387,82 @@ class TestBatchStatusWrite:
 
 
 class TestRunStartup:
-    def test_run_survives_non_clickhouse_error_from_write_worker_info(self, mocker):
-        mock_config = mocker.MagicMock()
-        mocker.patch("llm_worker.main.load_config", return_value=mock_config)
-        mocker.patch(
-            "llm_worker.main.load_provider_config", return_value=mocker.MagicMock()
-        )
-
-        mock_ch = mocker.MagicMock()
-        mock_ch.write_worker_info.side_effect = RuntimeError("boom")
-        mocker.patch("llm_worker.main.ClickHouseClient", return_value=mock_ch)
-
-        mocker.patch("llm_worker.main.create_provider", return_value=mocker.MagicMock())
-
-        mock_service = mocker.MagicMock()
-        mock_service_cls = mocker.patch(
-            "llm_worker.main.LLMWorkerService", return_value=mock_service
-        )
-
-        # write_worker_info is best-effort: a non-ClickHouseError bug in it must
-        # not prevent the worker from starting the actual service loop.
-        run()
-
-        mock_service_cls.assert_called_once_with(
-            mock_ch,
-            ANY,
-            mock_config.poll_interval,
-            worker_info=ANY,
-            capabilities_published=False,
-        )
-        mock_service.run.assert_called_once()
-
-    def test_run_publishes_worker_info_on_success(self, mocker):
-        mock_config = mocker.MagicMock()
-        mocker.patch("llm_worker.main.load_config", return_value=mock_config)
-        mock_provider_config = mocker.MagicMock()
-        mocker.patch(
-            "llm_worker.main.load_provider_config", return_value=mock_provider_config
-        )
-
-        mock_ch = mocker.MagicMock()
-        mocker.patch("llm_worker.main.ClickHouseClient", return_value=mock_ch)
-        mocker.patch("llm_worker.main.create_provider", return_value=mocker.MagicMock())
-        mock_service = mocker.MagicMock()
-        mocker.patch("llm_worker.main.LLMWorkerService", return_value=mock_service)
-
-        run()
-
-        # The consumer resolves the deployment's model pool from this marker, so
-        # swapped args or a hardcoded string would silently fall back to Bedrock.
-        mock_ch.write_worker_info.assert_called_once_with(
-            mock_provider_config.cloud, mock_provider_config.provider
-        )
-
-    def test_run_hands_a_capability_less_write_to_the_service(self, mocker):
+    def test_run_passes_the_provider_capabilities(self, mocker):
         mocker.patch("llm_worker.main.load_config", return_value=mocker.MagicMock())
         provider_config = mocker.MagicMock(cloud="aws", provider="bedrock")
         mocker.patch(
             "llm_worker.main.load_provider_config", return_value=provider_config
         )
-        mock_ch = mocker.MagicMock()
-        mock_ch.write_worker_info.return_value = False
-        mocker.patch("llm_worker.main.ClickHouseClient", return_value=mock_ch)
-        mocker.patch("llm_worker.main.create_provider", return_value=mocker.MagicMock())
+        mocker.patch("llm_worker.main.ClickHouseClient")
+        provider = mocker.MagicMock(capabilities=("output_format", "thinking"))
+        mocker.patch("llm_worker.main.create_provider", return_value=provider)
         mock_service_cls = mocker.patch("llm_worker.main.LLMWorkerService")
 
         run()
 
-        kwargs = mock_service_cls.call_args.kwargs
-        assert kwargs["worker_info"] == ("aws", "bedrock")
-        assert kwargs["capabilities_published"] is False
+        # The consumer resolves the deployment's model pool and the models it can
+        # offer from this marker, so swapped fields would silently mislead it.
+        assert mock_service_cls.call_args.kwargs["worker_info"] == WorkerInfo(
+            "aws", "bedrock", ("output_format", "thinking")
+        )
+        mock_service_cls.return_value.run.assert_called_once()
 
 
-class TestCapabilityRetry:
-    """The startup write may lack the capabilities column, because the chart's schema
-    Job and the worker roll out together. The loop retries until one write has them."""
+class TestWorkerInfoPublishing:
+    """The worker publishes at startup and republishes every interval, so the
+    capabilities land once the chart's migration adds the column."""
 
     def _service(self, mocker, ch):
         clock = mocker.patch("llm_worker.main.time.monotonic", return_value=1000.0)
-        service = LLMWorkerService(
-            ch,
-            MagicMock(),
-            1,
-            worker_info=("aws", "bedrock"),
-            capabilities_published=False,
-        )
-        return service, clock
+        return _make_service(ch_mock=ch), clock
 
-    def test_waits_for_the_retry_interval(self, mocker):
+    def test_publishes_at_startup(self, mocker):
         ch = MagicMock()
-        service, clock = self._service(mocker, ch)
+        service, _ = self._service(mocker, ch)
 
-        clock.return_value = 1000.0 + WORKER_INFO_RETRY_SECONDS - 1
-        service._retry_publish_capabilities()
+        service._maybe_publish_worker_info()
 
-        ch.write_worker_info.assert_not_called()
-
-    def test_retries_until_one_write_has_the_capabilities(self, mocker):
-        ch = MagicMock()
-        ch.write_worker_info.side_effect = [False, True]
-        service, clock = self._service(mocker, ch)
-
-        clock.return_value = 1000.0 + WORKER_INFO_RETRY_SECONDS
-        service._retry_publish_capabilities()
-        clock.return_value = 1000.0 + 2 * WORKER_INFO_RETRY_SECONDS
-        service._retry_publish_capabilities()
-        clock.return_value = 1000.0 + 3 * WORKER_INFO_RETRY_SECONDS
-        service._retry_publish_capabilities()
-
-        assert ch.write_worker_info.call_count == 2
-        ch.write_worker_info.assert_called_with("aws", "bedrock")
-
-    def test_a_failed_retry_is_logged_and_retried_later(self, mocker):
-        ch = MagicMock()
-        ch.write_worker_info.side_effect = [ClickHouseError("down"), True]
-        service, clock = self._service(mocker, ch)
-
-        clock.return_value = 1000.0 + WORKER_INFO_RETRY_SECONDS
-        service._retry_publish_capabilities()
-        clock.return_value = 1000.0 + 2 * WORKER_INFO_RETRY_SECONDS
-        service._retry_publish_capabilities()
-
-        assert ch.write_worker_info.call_count == 2
-        assert service._capabilities_published is True
-
-    def test_no_retry_when_the_startup_write_had_the_capabilities(self, mocker):
-        ch = MagicMock()
-        mocker.patch("llm_worker.main.time.monotonic", return_value=1000.0)
-        service = LLMWorkerService(
-            ch,
-            MagicMock(),
-            1,
-            worker_info=("aws", "bedrock"),
-            capabilities_published=True,
+        ch.write_worker_info.assert_called_once_with(
+            "aws", "bedrock", ("output_format", "thinking")
         )
 
-        service._retry_publish_capabilities()
-
-        ch.write_worker_info.assert_not_called()
-
-    def test_poll_loop_runs_the_retry(self, mocker):
+    def test_waits_for_the_interval(self, mocker):
         ch = MagicMock()
         service, clock = self._service(mocker, ch)
-        clock.return_value = 1000.0 + WORKER_INFO_RETRY_SECONDS
+        service._maybe_publish_worker_info()
+
+        clock.return_value = 1000.0 + WORKER_INFO_REPUBLISH_SECONDS - 1
+        service._maybe_publish_worker_info()
+
+        assert ch.write_worker_info.call_count == 1
+
+    def test_republishes_after_the_interval_even_after_a_successful_write(self, mocker):
+        ch = MagicMock()
+        service, clock = self._service(mocker, ch)
+        service._maybe_publish_worker_info()
+
+        clock.return_value = 1000.0 + WORKER_INFO_REPUBLISH_SECONDS
+        service._maybe_publish_worker_info()
+        clock.return_value = 1000.0 + 2 * WORKER_INFO_REPUBLISH_SECONDS
+        service._maybe_publish_worker_info()
+
+        assert ch.write_worker_info.call_count == 3
+
+    def test_a_failed_publish_is_logged_and_retried_after_the_interval(self, mocker):
+        ch = MagicMock()
+        ch.write_worker_info.side_effect = [RuntimeError("boom"), None]
+        service, clock = self._service(mocker, ch)
+
+        service._maybe_publish_worker_info()
+        clock.return_value = 1000.0 + WORKER_INFO_REPUBLISH_SECONDS
+        service._maybe_publish_worker_info()
+
+        assert ch.write_worker_info.call_count == 2
+
+    def test_a_failed_publish_does_not_stop_the_poll_loop(self, mocker):
+        ch = MagicMock()
+        ch.write_worker_info.side_effect = RuntimeError("boom")
+        service, _ = self._service(mocker, ch)
         mocker.patch("llm_worker.main.time.sleep")
 
         def stop_after_first_poll():
@@ -531,11 +470,33 @@ class TestCapabilityRetry:
             return []
 
         ch.get_pending_batches.side_effect = stop_after_first_poll
-        ch.write_worker_info.return_value = True
 
         service.run()
 
-        ch.write_worker_info.assert_called_once_with("aws", "bedrock")
+        ch.get_pending_batches.assert_called_once()
+
+    def test_republishes_between_pages_of_a_long_batch(self, mocker):
+        ch = MagicMock()
+        ch.get_batch_rows.side_effect = [[MagicMock()], [MagicMock()], []]
+        ch.get_batch_counts.return_value = (2, 2, 0)
+        clock = mocker.patch("llm_worker.main.time.monotonic", return_value=1000.0)
+        page_finished_at = iter(
+            [1000.0 + 1, 1000.0 + WORKER_INFO_REPUBLISH_SECONDS + 1]
+        )
+
+        def process_page(rows):
+            # The second page finishes after the interval has elapsed.
+            clock.return_value = next(page_finished_at)
+            return iter(())
+
+        executor = MagicMock()
+        executor.process_batch_iter.side_effect = process_page
+        service = _make_service(ch_mock=ch, executor_mock=executor)
+        service._maybe_publish_worker_info()
+
+        service.process_single_batch(BATCH_1)
+
+        assert ch.write_worker_info.call_count == 2
 
 
 class TestPollLoopErrorHandling:

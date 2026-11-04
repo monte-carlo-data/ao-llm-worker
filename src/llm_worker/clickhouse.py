@@ -1,6 +1,7 @@
 """ClickHouse client for llm_inputs and llm_results tables."""
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -10,10 +11,6 @@ from clickhouse_connect.driver.client import Client
 from llm_worker.config import ClickHouseConfig
 
 logger = logging.getLogger(__name__)
-
-# Request features this worker supports, published in llm_worker_info. The monolith
-# offers a model whose request needs one of them only when the worker lists it.
-WORKER_CAPABILITIES = ("output_format", "thinking", "effort")
 
 
 @dataclass
@@ -45,6 +42,7 @@ class ClickHouseClient:
     ):
         self._pending_batch_limit = pending_batch_limit
         self._batch_page_size = batch_page_size
+        self._warned_no_capabilities_column = False
         if client:
             self._client = client
         elif config:
@@ -60,7 +58,9 @@ class ClickHouseClient:
         else:
             raise ValueError("Either config or client must be provided")
 
-    def write_worker_info(self, cloud: str, provider: str) -> bool:
+    def write_worker_info(
+        self, cloud: str, provider: str, capabilities: Sequence[str]
+    ) -> None:
         """Publish this worker's cloud, provider and capabilities.
 
         The monolith reads the cloud to pick the deployment's cloud-native model
@@ -68,15 +68,14 @@ class ClickHouseClient:
         defaults updated_at to now(); a ReplacingMergeTree keyed on (cloud, provider)
         keeps a single current row, so re-publishing is cheap and idempotent.
 
-        Returns:
-            False when the table has no ``capabilities`` column yet (an older
-            chart), so only the cloud and provider were written. The caller
-            retries later to publish the capabilities.
+        On an older chart without the ``capabilities`` column, only the cloud and
+        provider are written. The worker republishes periodically, so the
+        capabilities land once the chart's migration adds the column.
         """
         if self._has_capabilities_column():
             self._client.insert(
                 "llm_worker_info",
-                [[cloud, provider, list(WORKER_CAPABILITIES)]],
+                [[cloud, provider, list(capabilities)]],
                 column_names=["cloud", "provider", "capabilities"],
                 settings={"async_insert": 0},
             )
@@ -85,21 +84,22 @@ class ClickHouseClient:
                 extra={
                     "cloud": cloud,
                     "provider": provider,
-                    "capabilities": list(WORKER_CAPABILITIES),
+                    "capabilities": list(capabilities),
                 },
             )
-            return True
+            return
         self._client.insert(
             "llm_worker_info",
             [[cloud, provider]],
             column_names=["cloud", "provider"],
             settings={"async_insert": 0},
         )
-        logger.warning(
-            "worker_info_written_without_capabilities",
-            extra={"cloud": cloud, "provider": provider},
-        )
-        return False
+        extra = {"cloud": cloud, "provider": provider}
+        if self._warned_no_capabilities_column:
+            logger.debug("worker_info_written_without_capabilities", extra=extra)
+        else:
+            self._warned_no_capabilities_column = True
+            logger.warning("worker_info_written_without_capabilities", extra=extra)
 
     def _has_capabilities_column(self) -> bool:
         # Checked up front, not by parsing an insert error: the chart's schema Job

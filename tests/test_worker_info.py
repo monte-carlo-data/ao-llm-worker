@@ -3,9 +3,12 @@
 ``test_clickhouse.py`` covers the same against a real server, but CI doesn't run it.
 """
 
+import logging
 from unittest.mock import MagicMock
 
-from llm_worker.clickhouse import WORKER_CAPABILITIES, ClickHouseClient
+from llm_worker.clickhouse import ClickHouseClient
+
+CAPABILITIES = ("output_format", "thinking")
 
 
 def _client(has_capabilities_column: bool) -> tuple[ClickHouseClient, MagicMock]:
@@ -17,18 +20,18 @@ def _client(has_capabilities_column: bool) -> tuple[ClickHouseClient, MagicMock]
 def test_writes_the_capabilities_when_the_column_exists():
     ch, raw = _client(has_capabilities_column=True)
 
-    assert ch.write_worker_info("azure", "foundry") is True
+    ch.write_worker_info("azure", "foundry", CAPABILITIES)
 
     raw.insert.assert_called_once()
     args, kwargs = raw.insert.call_args
-    assert args[1] == [["azure", "foundry", list(WORKER_CAPABILITIES)]]
+    assert args[1] == [["azure", "foundry", list(CAPABILITIES)]]
     assert kwargs["column_names"] == ["cloud", "provider", "capabilities"]
 
 
 def test_writes_cloud_and_provider_only_on_an_older_table():
     ch, raw = _client(has_capabilities_column=False)
 
-    assert ch.write_worker_info("azure", "foundry") is False
+    ch.write_worker_info("azure", "foundry", CAPABILITIES)
 
     raw.insert.assert_called_once()
     args, kwargs = raw.insert.call_args
@@ -36,6 +39,16 @@ def test_writes_cloud_and_provider_only_on_an_older_table():
     assert kwargs["column_names"] == ["cloud", "provider"]
 
 
-def test_capabilities_cover_the_request_profile_fields():
-    # The monolith offers models with a request profile only when all three are listed.
-    assert set(WORKER_CAPABILITIES) == {"output_format", "thinking", "effort"}
+def test_warns_once_about_a_missing_column_then_logs_at_debug(caplog):
+    ch, _ = _client(has_capabilities_column=False)
+    caplog.set_level(logging.DEBUG, logger="llm_worker.clickhouse")
+
+    for _ in range(3):
+        ch.write_worker_info("azure", "foundry", CAPABILITIES)
+
+    levels = [
+        r.levelno
+        for r in caplog.records
+        if r.message == "worker_info_written_without_capabilities"
+    ]
+    assert levels == [logging.WARNING, logging.DEBUG, logging.DEBUG]

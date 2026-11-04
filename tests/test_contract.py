@@ -201,3 +201,20 @@ class TestRequestProfileFields:
     def test_rejects_a_non_string_thinking_or_effort(self, params):
         with pytest.raises(ValueError, match="non-empty string"):
             build_request("m", "p", params, OUTPUT_FORMAT_TOOL_CONFIG)
+
+
+class TestInvalidCombinations:
+    def test_rejects_output_format_with_tools(self):
+        tool_config = {**OUTPUT_FORMAT_TOOL_CONFIG, "tools": V1_TOOL_CONFIG["tools"]}
+        with pytest.raises(ValueError, match="both output_format and tools"):
+            build_request("m", "p", {}, tool_config)
+
+    def test_rejects_thinking_with_a_forced_tool(self):
+        with pytest.raises(ValueError, match="forced tool choice"):
+            build_request("m", "p", {"thinking": "adaptive"}, V1_TOOL_CONFIG)
+
+    def test_allows_thinking_with_tools_on_auto(self):
+        tool_config = {"tools": V1_TOOL_CONFIG["tools"], "tool_choice": "auto"}
+        req = build_request("m", "p", {"thinking": "adaptive"}, tool_config)
+        assert req.thinking == "adaptive"
+        assert req.forced_tool is None

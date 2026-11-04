@@ -396,3 +396,20 @@ class TestRequestProfiles:
 
         assert "tool_uses" not in response.output
         assert response.output["stop_reason"] == "end_turn"
+
+    def test_json_outputs_alone_send_no_temperature(self, backend, mocker):
+        client = mocker.Mock()
+        client.messages.create.return_value = _profiled_response(
+            [_text_block('{"score": 1}')]
+        )
+
+        backend.make(client).complete(_profiled_req(backend, thinking=None))
+
+        client.messages.create.assert_called_once()
+        kwargs = client.messages.create.call_args.kwargs
+        assert "temperature" not in kwargs
+        assert "thinking" not in kwargs
+
+    def test_publishes_all_request_profile_capabilities(self, backend, mocker):
+        provider = backend.make(mocker.Mock())
+        assert provider.capabilities == ("output_format", "thinking", "effort")

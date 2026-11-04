@@ -25,14 +25,17 @@ On startup the worker publishes its `(cloud, provider, capabilities)` to the
 - The monolith reads the cloud to resolve which cloud-native Claude model pool a
   deployment uses (`aws`→bedrock, `gcp`→vertex, `azure`→foundry) when a batch's
   rows carry no explicit model.
-- The monolith reads `capabilities` to decide which models it can offer. This
-  worker lists `output_format`, `thinking` and `effort` (see
-  [Request profiles](#request-profiles)).
+- The monolith reads `capabilities` to decide which models it can offer (see
+  [Request profiles](#request-profiles)). The Vertex and Foundry providers list
+  `output_format`, `thinking` and `effort`. The Bedrock provider lists
+  `output_format` and `thinking`: `effort` is added once it's been tested on dev,
+  because Converse may merge or reject it next to `outputConfig.textFormat`.
 
-The write is best-effort — a failure is logged and never blocks batch processing.
-On an older chart without the `capabilities` column, the worker writes the cloud
-and provider only, then retries the full write every 10 minutes until it succeeds
-once.
+The worker republishes every 10 minutes, checked between batches and between pages
+of a batch. On an older chart without the `capabilities` column, it writes the
+cloud and provider only, so the capabilities land once the chart's migration adds
+the column. The write is best-effort — a failure is logged and never blocks batch
+processing.
 
 ### Request profiles
 
@@ -52,14 +55,17 @@ The worker maps them to each backend:
 - **Bedrock:** Converse `outputConfig.textFormat`, with the schema as a JSON
   string. Thinking and effort go in `additionalModelRequestFields`.
 
-A request with `thinking` never sends a temperature. The JSON reply is stored as
+A request with `thinking` or `output_format` never sends a temperature. A row
+that combines `output_format` with `tools`, or `thinking` with a forced tool
+choice, fails with a message. The JSON reply is stored as
 `tool_uses[0]`, where a forced tool call's input goes. A refusal, a token-cap stop
 or a reply that isn't a JSON object still completes the row, without `tool_uses`.
 The response records `stop_reason`, plus `refusal_category` or `result_error`
 when they apply. Only API errors fail a row.
 
 The Bedrock client waits up to 120 seconds for a reply. Bedrock compiles a new
-schema on its first request, which can take about 90 seconds.
+schema on its first request, which can take about 90 seconds. The client makes
+one attempt per call; the worker's own retry loop handles retries.
 
 On the `bedrock` provider, a `converse()` call resolves through a
 cost-attribution inference profile ARN when `BEDROCK_INFERENCE_PROFILES` maps

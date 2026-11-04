@@ -34,8 +34,9 @@ from llm_worker.providers.base import (
     ErrorDisposition,
     LLMProvider,
     LLMResponse,
+    build_output,
     is_temperature_rejection_message,
-    json_output_result,
+    omits_temperature,
 )
 
 logger = logging.getLogger(__name__)
@@ -71,6 +72,12 @@ _PROFILE_ARN_COOLDOWN_SECONDS = 300
 # botocore's default read timeout is 60s. Bedrock compiles a new JSON-outputs schema
 # on its first request, which can take about 90s.
 BEDROCK_READ_TIMEOUT_SECONDS = 120
+# botocore's own retries are off: the executor's tenacity loop owns retries, and
+# stacking both would multiply attempts and the time a row can take.
+BEDROCK_CLIENT_CONFIG = Config(
+    read_timeout=BEDROCK_READ_TIMEOUT_SECONDS,
+    retries={"total_max_attempts": 1},
+)
 
 
 def _error_code(exc: ClientError) -> str:
@@ -91,12 +98,17 @@ def _is_retryable(exc: BaseException) -> bool:
 
 
 class BedrockProvider(LLMProvider):
+    # No "effort" yet. Effort goes through additionalModelRequestFields as
+    # output_config.effort, which Converse may merge with or reject next to
+    # outputConfig.textFormat. Add it once that's been tested on dev.
+    capabilities = ("output_format", "thinking")
+
     def __init__(self, config: BedrockConfig, boto_client=None):
         super().__init__()
         self._client = boto_client or boto3.client(
             "bedrock-runtime",
             region_name=config.region,
-            config=Config(read_timeout=BEDROCK_READ_TIMEOUT_SECONDS),
+            config=BEDROCK_CLIENT_CONFIG,
         )
         self._inference_profiles = config.inference_profiles
         self._profile_invalid_since: dict[str, float] = {}
@@ -159,7 +171,7 @@ class BedrockProvider(LLMProvider):
             exception_type=ClientError,
             is_rejection=_is_temperature_rejection,
             log_event="bedrock_temperature_unsupported",
-            omit_temperature=request.thinking is not None,
+            omit_temperature=omits_temperature(request),
         )
 
     def classify_error(self, exc: BaseException) -> ErrorDisposition:
@@ -252,17 +264,11 @@ def _extract_output(response: dict, *, json_output: bool = False) -> dict:
             tool_use = block["toolUse"]
             if "input" in tool_use:
                 tool_uses.append(tool_use["input"])
-    output_text = "".join(texts)
-
-    if json_output:
-        # Converse has no ``refusal`` stop reason and no refusal category, so a
-        # refusal is recorded under whatever stop reason Converse maps it to.
-        return json_output_result(
-            output_text=output_text,
-            final_text=texts[-1] if texts else "",
-            stop_reason=response.get("stopReason"),
-        )
-
-    if tool_uses:
-        return {"output_text": output_text, "tool_uses": tool_uses}
-    return {"output_text": output_text}
+    # Converse has no ``refusal`` stop reason and no refusal category, so a refusal
+    # is recorded under whatever stop reason Converse maps it to.
+    return build_output(
+        texts,
+        tool_uses,
+        json_output=json_output,
+        stop_reason=response.get("stopReason"),
+    )

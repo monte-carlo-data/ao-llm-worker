@@ -2,9 +2,11 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from llm_worker.clickhouse import WORKER_CAPABILITIES, ClickHouseClient, LLMResult
+from llm_worker.clickhouse import ClickHouseClient, LLMResult
 
 pytestmark = [pytest.mark.clickhouse]
+
+CAPABILITIES = ("output_format", "thinking", "effort")
 
 # Fixed UUIDs for deterministic tests.
 BATCH_1 = UUID("00000000-0000-0000-0000-000000000001")
@@ -44,19 +46,19 @@ def _insert_pending_batch(ch_client, batch_id):
 
 class TestWriteWorkerInfo:
     def test_writes_row(self, ch_client):
-        assert ch_client.write_worker_info("aws", "bedrock") is True
+        ch_client.write_worker_info("aws", "bedrock", CAPABILITIES)
         result = ch_client._client.query(
             "SELECT cloud, provider, capabilities FROM llm_worker_info FINAL"
             " ORDER BY updated_at DESC LIMIT 1"
         )
-        assert result.result_rows[0] == ("aws", "bedrock", list(WORKER_CAPABILITIES))
+        assert result.result_rows[0] == ("aws", "bedrock", list(CAPABILITIES))
 
     def test_writes_without_capabilities_on_an_older_table(self, ch_client):
         ch_client._client.command(
             "ALTER TABLE llm_worker_info DROP COLUMN capabilities"
         )
         try:
-            assert ch_client.write_worker_info("gcp", "vertex") is False
+            ch_client.write_worker_info("gcp", "vertex", CAPABILITIES)
             result = ch_client._client.query(
                 "SELECT cloud, provider FROM llm_worker_info FINAL"
             )
@@ -68,8 +70,8 @@ class TestWriteWorkerInfo:
             )
 
     def test_republish_keeps_single_row(self, ch_client):
-        ch_client.write_worker_info("gcp", "vertex")
-        ch_client.write_worker_info("gcp", "vertex")
+        ch_client.write_worker_info("gcp", "vertex", CAPABILITIES)
+        ch_client.write_worker_info("gcp", "vertex", CAPABILITIES)
         result = ch_client._client.query("SELECT count() FROM llm_worker_info FINAL")
         assert result.result_rows[0][0] == 1
 

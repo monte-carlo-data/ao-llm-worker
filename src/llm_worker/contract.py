@@ -87,6 +87,14 @@ def build_request(
     temperature = params.get("temperature", DEFAULT_TEMPERATURE)
 
     tools, forced_tool = _normalize_tools(tool_config)
+    output_format = _normalize_output_format(tool_config)
+    thinking = _optional_str(params, "thinking")
+    # The executor fails the row with these messages. Both combinations would
+    # otherwise reach the API as a request it rejects or answers unpredictably.
+    if output_format is not None and tools:
+        raise ValueError("tool_config can't have both output_format and tools")
+    if thinking is not None and forced_tool is not None:
+        raise ValueError("params.thinking can't be combined with a forced tool choice")
 
     return ContractRequest(
         model_id=model_id,
@@ -95,8 +103,8 @@ def build_request(
         temperature=temperature,
         tools=tools,
         forced_tool=forced_tool,
-        output_format=_normalize_output_format(tool_config),
-        thinking=_optional_str(params, "thinking"),
+        output_format=output_format,
+        thinking=thinking,
         effort=_optional_str(params, "effort"),
     )
 
