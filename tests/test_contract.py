@@ -132,3 +132,89 @@ class TestBuildRequest:
 
     def test_returns_contract_request(self):
         assert isinstance(build_request("m", "hi", {}, {}), ContractRequest)
+
+
+# What the monolith sends for a model that rejects a forced tool call.
+OUTPUT_FORMAT_TOOL_CONFIG = {
+    "output_format": {
+        "type": "json_schema",
+        "name": "evaluation_result",
+        "description": "Return the evaluation result",
+        "schema": {
+            "type": "object",
+            "properties": {"score": {"type": "number"}},
+            "required": ["score"],
+            "additionalProperties": False,
+        },
+    }
+}
+
+
+class TestRequestProfileFields:
+    def test_parses_output_format_thinking_and_effort(self):
+        req = build_request(
+            "m",
+            "p",
+            {"max_output_tokens": 4012, "thinking": "adaptive", "effort": "high"},
+            OUTPUT_FORMAT_TOOL_CONFIG,
+        )
+
+        assert req.tools == []
+        assert req.forced_tool is None
+        assert req.output_format is not None
+        assert req.output_format.name == "evaluation_result"
+        assert req.output_format.description == "Return the evaluation result"
+        assert (
+            req.output_format.schema
+            == OUTPUT_FORMAT_TOOL_CONFIG["output_format"]["schema"]
+        )
+        assert req.thinking == "adaptive"
+        assert req.effort == "high"
+        assert req.max_output_tokens == 4012
+
+    def test_effort_is_optional(self):
+        req = build_request(
+            "m", "p", {"thinking": "adaptive"}, OUTPUT_FORMAT_TOOL_CONFIG
+        )
+        assert req.effort is None
+
+    @pytest.mark.parametrize("tool_config", [V0_TOOL_CONFIG, V1_TOOL_CONFIG, {}])
+    def test_existing_rows_get_none_for_the_new_fields(self, tool_config):
+        req = build_request("m", "p", {"max_output_tokens": 512}, tool_config)
+        assert req.output_format is None
+        assert req.thinking is None
+        assert req.effort is None
+
+    @pytest.mark.parametrize(
+        "output_format, message",
+        [
+            ({"type": "text", "name": "n", "schema": {}}, "json_schema"),
+            ({"type": "json_schema", "name": "n"}, "schema"),
+            ({"type": "json_schema", "schema": {}}, "name"),
+        ],
+    )
+    def test_rejects_a_malformed_output_format(self, output_format, message):
+        with pytest.raises(ValueError, match=message):
+            build_request("m", "p", {}, {"output_format": output_format})
+
+    @pytest.mark.parametrize("params", [{"thinking": ""}, {"effort": 3}])
+    def test_rejects_a_non_string_thinking_or_effort(self, params):
+        with pytest.raises(ValueError, match="non-empty string"):
+            build_request("m", "p", params, OUTPUT_FORMAT_TOOL_CONFIG)
+
+
+class TestInvalidCombinations:
+    def test_rejects_output_format_with_tools(self):
+        tool_config = {**OUTPUT_FORMAT_TOOL_CONFIG, "tools": V1_TOOL_CONFIG["tools"]}
+        with pytest.raises(ValueError, match="both output_format and tools"):
+            build_request("m", "p", {}, tool_config)
+
+    def test_rejects_thinking_with_a_forced_tool(self):
+        with pytest.raises(ValueError, match="forced tool choice"):
+            build_request("m", "p", {"thinking": "adaptive"}, V1_TOOL_CONFIG)
+
+    def test_allows_thinking_with_tools_on_auto(self):
+        tool_config = {"tools": V1_TOOL_CONFIG["tools"], "tool_choice": "auto"}
+        req = build_request("m", "p", {"thinking": "adaptive"}, tool_config)
+        assert req.thinking == "adaptive"
+        assert req.forced_tool is None

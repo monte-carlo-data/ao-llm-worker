@@ -465,7 +465,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "anthropic", marker = "extra == 'azure'", specifier = ">=0.116.0" },
-    { name = "anthropic", extras = ["vertex"], marker = "extra == 'gcp'", specifier = ">=0.40.0" },
+    { name = "anthropic", extras = ["vertex"], marker = "extra == 'gcp'", specifier = ">=0.116.0" },
     { name = "azure-identity", marker = "extra == 'azure'", specifier = ">=1.19.0" },
     { name = "boto3", marker = "extra == 'aws'", specifier = ">=1.42.0" },
     { name = "clickhouse-connect", specifier = ">=0.8.0" },

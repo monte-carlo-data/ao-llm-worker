@@ -1,5 +1,6 @@
 """Provider-agnostic interface for LLM backends."""
 
+import json
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import Callable
@@ -15,6 +16,11 @@ T = TypeVar("T")
 ExcT = TypeVar("ExcT", bound=BaseException)
 
 _TEMPERATURE_REJECTION_KEYWORDS = ("not support", "unsupported", "deprecated")
+
+# Stop reasons of a reply that finished on its own. A JSON reply that stopped any
+# other way, such as at the token cap or with Bedrock's malformed_model_output, isn't
+# a result even when its text parses.
+_FINISHED_STOP_REASONS = frozenset({"end_turn", "stop_sequence"})
 
 
 def is_temperature_rejection_message(message: str) -> bool:
@@ -32,6 +38,54 @@ def is_temperature_rejection_message(message: str) -> bool:
     return "temperature" in low and any(
         keyword in low for keyword in _TEMPERATURE_REJECTION_KEYWORDS
     )
+
+
+def build_output(
+    texts: list[str],
+    tool_uses: list[dict],
+    *,
+    json_output: bool,
+    stop_reason: str | None = None,
+    refusal_category: str | None = None,
+) -> dict:
+    """The ``llm_results.response`` envelope for a reply.
+
+    ``output_text`` joins the text blocks. Without JSON outputs, ``tool_uses`` holds
+    the tool calls' inputs and is omitted when empty.
+
+    With JSON outputs, the last text block holds the JSON. A reply that finished on
+    its own and parses as a JSON object is stored as ``tool_uses[0]``, where a forced
+    tool call's input goes. Any other reply still completes the row, without
+    ``tool_uses``, and records why: the stop reason, the refusal category when the
+    backend gives one, and ``result_error`` unless it's a refusal. A refusal or a
+    token-cap stop isn't an API error, so it never fails the row; the monolith drops
+    rows without a result.
+
+    Args:
+        texts: The reply's text blocks in order. Thinking blocks aren't text
+            blocks, so callers leave them out.
+    """
+    output: dict = {"output_text": "".join(texts)}
+    if not json_output:
+        if tool_uses:
+            output["tool_uses"] = tool_uses
+        return output
+    if stop_reason != "refusal":
+        try:
+            parsed = json.loads(texts[-1]) if texts else None
+        except ValueError:
+            parsed = None
+        if not isinstance(parsed, dict):
+            output["result_error"] = "reply is not a JSON object"
+        elif stop_reason in _FINISHED_STOP_REASONS:
+            output["tool_uses"] = [parsed]
+            return output
+        else:
+            output["result_error"] = "reply did not finish"
+    output["stop_reason"] = stop_reason or ""
+    if refusal_category:
+        output["refusal_category"] = refusal_category
+    return output
 
 
 @dataclass
@@ -65,6 +119,10 @@ class LLMProvider(ABC):
     result mapping are owned by the executor — not the provider.
     """
 
+    # Request features this provider supports, published in llm_worker_info. The
+    # monolith offers a model whose request needs one only when it's listed.
+    capabilities: tuple[str, ...] = ()
+
     def __init__(self) -> None:
         # Resolved model refs learned to reject a custom temperature. Per-model,
         # not process-wide: a single provider instance serves many models (it
@@ -96,6 +154,7 @@ class LLMProvider(ABC):
         exception_type: type[ExcT],
         is_rejection: Callable[[ExcT], bool],
         log_event: str,
+        omit_temperature: bool = False,
     ) -> T:
         """Shared "try with temperature, learn and retry once without it" state
         machine used by both the Bedrock and Anthropic Messages adapters.
@@ -108,7 +167,14 @@ class LLMProvider(ABC):
         out-of-range validation error) — in which case the model is learned
         into ``self._omit_temperature`` and ``call`` is retried once, without
         temperature.
+
+        ``omit_temperature`` skips temperature for this request without a first
+        attempt. Requests with thinking or JSON outputs set it: the models that need
+        them reject a custom temperature, and their error message may not match
+        ``is_rejection``.
         """
+        if omit_temperature:
+            return call(False)
         include_temperature = model not in self._omit_temperature
         try:
             return call(include_temperature)
@@ -120,3 +186,8 @@ class LLMProvider(ABC):
             logger.warning(log_event, extra={"model": model})
             self._omit_temperature.add(model)
             return call(False)
+
+
+def omits_temperature(request: ContractRequest) -> bool:
+    """Whether a request is for a model that rejects a custom temperature."""
+    return request.thinking is not None or request.output_format is not None

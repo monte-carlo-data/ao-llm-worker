@@ -4,7 +4,7 @@ import pytest
 
 from llm_worker.config import BedrockConfig
 from llm_worker.executor import BatchExecutor
-from llm_worker.main import LLMWorkerService
+from llm_worker.main import LLMWorkerService, WorkerInfo
 from llm_worker.providers.bedrock import BedrockProvider
 
 pytestmark = [pytest.mark.clickhouse]
@@ -76,7 +76,12 @@ def _make_service(ch_client, mock_boto):
         retry_max_attempts=1,
         retry_max_backoff=0,
     )
-    return LLMWorkerService(ch_client, executor, poll_interval=1)
+    return LLMWorkerService(
+        ch_client,
+        executor,
+        poll_interval=1,
+        worker_info=WorkerInfo("aws", "bedrock", BedrockProvider.capabilities),
+    )
 
 
 ROW_4 = UUID("00000000-0000-0000-0000-000000000014")

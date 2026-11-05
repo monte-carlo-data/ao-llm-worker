@@ -5,6 +5,7 @@ import os
 import signal
 import time
 from collections.abc import Iterable
+from dataclasses import dataclass
 from types import FrameType
 from uuid import UUID
 
@@ -28,22 +29,45 @@ logger = logging.getLogger(__name__)
 RESULT_WRITE_BATCH_SIZE = 50
 RESULT_WRITE_MAX_ATTEMPTS = 3
 BATCH_STATUS_WRITE_MAX_ATTEMPTS = 3
+# How often the worker republishes its cloud, provider and capabilities. The chart's
+# schema Job and the worker roll out together, so the capabilities column can appear
+# after startup; republishing picks it up without a restart.
+WORKER_INFO_REPUBLISH_SECONDS = 600
+# A failed write, such as at startup before ClickHouse is reachable, retries sooner.
+WORKER_INFO_RETRY_SECONDS = 30
+
+
+@dataclass(frozen=True)
+class WorkerInfo:
+    """What the worker publishes to llm_worker_info."""
+
+    cloud: str
+    provider: str
+    capabilities: tuple[str, ...]
 
 
 class LLMWorkerService:
     def __init__(
-        self, ch: ClickHouseClient, executor: BatchExecutor, poll_interval: float
+        self,
+        ch: ClickHouseClient,
+        executor: BatchExecutor,
+        poll_interval: float,
+        *,
+        worker_info: WorkerInfo,
     ):
         self._ch = ch
         self._executor = executor
         self._poll_interval = poll_interval
         self._should_stop = False
+        self._worker_info = worker_info
+        self._worker_info_next_at: float | None = None
 
     def run(self) -> None:
         self._install_signal_handlers()
         logger.info("worker_started", extra={"poll_interval": self._poll_interval})
 
         while not self._should_stop:
+            self._maybe_publish_worker_info()
             try:
                 batch_ids = self._ch.get_pending_batches()
                 if batch_ids:
@@ -59,6 +83,30 @@ class LLMWorkerService:
                     time.sleep(self._poll_interval)
 
         logger.info("worker_stopped")
+
+    def _maybe_publish_worker_info(self) -> None:
+        """Publish the worker info at startup, then every WORKER_INFO_REPUBLISH_SECONDS.
+
+        Called from the poll loop and between pages of a batch, so a long backlog
+        can't delay it. Best-effort: a failure is logged, retried after
+        WORKER_INFO_RETRY_SECONDS, and never stops batch processing. A stopping
+        worker doesn't publish.
+        """
+        # After a rollback, the replacement worker's startup row must stay the
+        # newest, so a worker finishing its batch during shutdown doesn't write.
+        if self._should_stop:
+            return
+        now = time.monotonic()
+        if self._worker_info_next_at is not None and now < self._worker_info_next_at:
+            return
+        info = self._worker_info
+        try:
+            self._ch.write_worker_info(info.cloud, info.provider, info.capabilities)
+        except Exception as exc:  # noqa: BLE001 — best-effort metadata write
+            logger.warning("worker_info_write_failed", extra={"error": str(exc)})
+            self._worker_info_next_at = now + WORKER_INFO_RETRY_SECONDS
+            return
+        self._worker_info_next_at = now + WORKER_INFO_REPUBLISH_SECONDS
 
     def process_single_batch(self, batch_id: UUID) -> None:
         saw_rows = False
@@ -77,6 +125,7 @@ class LLMWorkerService:
                 extra={"batch_id": str(batch_id), "rows": len(rows)},
             )
             self._write_results_in_chunks(self._executor.process_batch_iter(rows))
+            self._maybe_publish_worker_info()
 
         if not saw_rows:
             total_rows, total_completed, total_failed = self._ch.get_batch_counts(
@@ -207,16 +256,17 @@ def run():
         config.retry_max_attempts,
         config.retry_max_backoff,
     )
-    # Best-effort: publish this worker's cloud/provider for the monolith's
-    # cloud-native model resolution. Non-critical metadata — a failure here
-    # (e.g. the llm_worker_info table not yet migrated) must not stop batch
-    # processing, so log and continue.
-    try:
-        ch.write_worker_info(provider_config.cloud, provider_config.provider)
-    except Exception as exc:  # noqa: BLE001 — best-effort metadata write must never block startup
-        logger.warning("worker_info_write_failed", extra={"error": str(exc)})
-
-    service = LLMWorkerService(ch, executor, config.poll_interval)
+    # The service publishes the worker info at startup and then periodically.
+    service = LLMWorkerService(
+        ch,
+        executor,
+        config.poll_interval,
+        worker_info=WorkerInfo(
+            cloud=provider_config.cloud,
+            provider=provider_config.provider,
+            capabilities=provider.capabilities,
+        ),
+    )
     service.run()
 
 
