@@ -70,9 +70,8 @@ _PROFILE_ARN_ERROR_CODES = {"ResourceNotFoundException"}
 # while not repeating the doubled-call cost on every single row in between.
 _PROFILE_ARN_COOLDOWN_SECONDS = 300
 
-# botocore's default read timeout is 60s. Bedrock compiles a new JSON-outputs schema
-# on its first request, and thinking makes replies longer. botocore keeps its own
-# retries, which absorb throttling inside each executor attempt.
+# botocore's default read timeout is 60s, and thinking makes replies longer.
+# botocore keeps its own retries, which absorb throttling inside each executor attempt.
 BEDROCK_READ_TIMEOUT_SECONDS = 120
 BEDROCK_CLIENT_CONFIG = Config(read_timeout=BEDROCK_READ_TIMEOUT_SECONDS)
 

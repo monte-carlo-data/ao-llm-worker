@@ -45,8 +45,7 @@ from llm_worker.providers.base import (
 class AnthropicMessagesProvider(LLMProvider):
     """Base adapter for backends that speak the Anthropic Messages API."""
 
-    # No "effort" until it's been tried on Vertex and Foundry.
-    capabilities = ("output_format", "thinking")
+    capabilities = ("output_format", "thinking", "effort")
 
     def __init__(self, client):
         super().__init__()

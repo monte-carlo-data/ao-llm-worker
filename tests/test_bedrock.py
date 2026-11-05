@@ -659,7 +659,6 @@ class TestRequestProfiles:
         assert output["tool_uses"] == [{"score": 1}]
 
     def test_records_a_refusal_and_its_category(self):
-        # The shape Bedrock returned for Sonnet 5.5 and Opus 5.5 on dev.
         response = {
             "output": {"message": {"content": []}},
             "stopReason": "content_filtered",

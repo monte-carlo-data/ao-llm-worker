@@ -26,10 +26,8 @@ On startup the worker publishes its `(cloud, provider, capabilities)` to the
   deployment uses (`aws`→bedrock, `gcp`→vertex, `azure`→foundry) when a batch's
   rows carry no explicit model.
 - The monolith reads `capabilities` to decide which models it can offer (see
-  [Request profiles](#request-profiles)). The Vertex and Foundry providers list
-  `output_format`, `thinking` and `effort`. The Bedrock provider lists
-  `output_format` and `thinking`: `effort` is added once it's been tested on dev,
-  because Converse may merge or reject it next to `outputConfig.textFormat`.
+  [Request profiles](#request-profiles)). Every provider lists `output_format`,
+  `thinking` and `effort`.
 
 The worker republishes every 10 minutes, checked between batches and between pages
 of a batch. On an older chart without the `capabilities` column, it writes the
@@ -60,12 +58,14 @@ that combines `output_format` with `tools`, or `thinking` with a forced tool
 choice, fails with a message. The JSON reply is stored as
 `tool_uses[0]`, where a forced tool call's input goes. A refusal, a token-cap stop
 or a reply that isn't a JSON object still completes the row, without `tool_uses`.
-The response records `stop_reason`, plus `refusal_category` or `result_error`
-when they apply. Only API errors fail a row.
+So does a JSON reply that didn't end with `end_turn` or `stop_sequence`. The
+response records `stop_reason`, plus `refusal_category` or `result_error` when
+they apply. Only API errors fail a row. On Bedrock, a refusal arrives as
+`stopReason: content_filtered`; the worker asks for Claude's `stop_details` to
+record it as a refusal with its category.
 
-The Bedrock client waits up to 120 seconds for a reply. Bedrock compiles a new
-schema on its first request, which can take about 90 seconds. The client makes
-one attempt per call; the worker's own retry loop handles retries.
+The Bedrock client waits up to 120 seconds for a reply and keeps botocore's
+default retries.
 
 On the `bedrock` provider, a `converse()` call resolves through a
 cost-attribution inference profile ARN when `BEDROCK_INFERENCE_PROFILES` maps

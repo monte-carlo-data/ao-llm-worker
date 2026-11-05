@@ -424,6 +424,6 @@ class TestRequestProfiles:
         assert "temperature" not in kwargs
         assert "thinking" not in kwargs
 
-    def test_publishes_no_effort_capability_until_it_is_tried(self, backend, mocker):
+    def test_publishes_all_request_profile_capabilities(self, backend, mocker):
         provider = backend.make(mocker.Mock())
-        assert provider.capabilities == ("output_format", "thinking")
+        assert provider.capabilities == ("output_format", "thinking", "effort")
