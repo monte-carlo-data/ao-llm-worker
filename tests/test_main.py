@@ -484,7 +484,19 @@ class TestWorkerInfoPublishing:
 
         service.run()
 
+        ch.write_worker_info.assert_called_once()
         ch.get_pending_batches.assert_called_once()
+
+    def test_a_stopping_worker_does_not_publish(self, mocker):
+        ch = MagicMock()
+        service, clock = self._service(mocker, ch)
+        service._maybe_publish_worker_info()
+
+        service.stop()
+        clock.return_value = 1000.0 + WORKER_INFO_REPUBLISH_SECONDS
+        service._maybe_publish_worker_info()
+
+        ch.write_worker_info.assert_called_once()
 
     def test_republishes_between_pages_of_a_long_batch(self, mocker):
         ch = MagicMock()

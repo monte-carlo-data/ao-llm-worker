@@ -89,8 +89,13 @@ class LLMWorkerService:
 
         Called from the poll loop and between pages of a batch, so a long backlog
         can't delay it. Best-effort: a failure is logged, retried after
-        WORKER_INFO_RETRY_SECONDS, and never stops batch processing.
+        WORKER_INFO_RETRY_SECONDS, and never stops batch processing. A stopping
+        worker doesn't publish.
         """
+        # After a rollback, the replacement worker's startup row must stay the
+        # newest, so a worker finishing its batch during shutdown doesn't write.
+        if self._should_stop:
+            return
         now = time.monotonic()
         if self._worker_info_next_at is not None and now < self._worker_info_next_at:
             return
