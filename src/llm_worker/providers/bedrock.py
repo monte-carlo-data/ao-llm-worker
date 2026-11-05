@@ -8,12 +8,19 @@ this adapter retries once internally when the configured cost-attribution
 inference-profile ARN turns out to be stale or invalid, falling back to the
 bare model id before deferring to the executor's retry loop for everything
 else.
+
+A JSON-outputs request maps to Converse's ``outputConfig.textFormat``. Converse has
+no fields for Claude's thinking and effort, so they go through
+``additionalModelRequestFields`` in the Messages API's own shape. A refusal's
+``stop_details`` comes back through ``additionalModelResponseFields``.
 """
 
+import json
 import logging
 import time
 
 import boto3
+from botocore.config import Config
 from botocore.exceptions import (
     ClientError,
     ConnectionClosedError,
@@ -28,7 +35,9 @@ from llm_worker.providers.base import (
     ErrorDisposition,
     LLMProvider,
     LLMResponse,
+    build_output,
     is_temperature_rejection_message,
+    omits_temperature,
 )
 
 logger = logging.getLogger(__name__)
@@ -61,6 +70,11 @@ _PROFILE_ARN_ERROR_CODES = {"ResourceNotFoundException"}
 # while not repeating the doubled-call cost on every single row in between.
 _PROFILE_ARN_COOLDOWN_SECONDS = 300
 
+# botocore's default read timeout is 60s, and thinking makes replies longer.
+# botocore keeps its own retries, which absorb throttling inside each executor attempt.
+BEDROCK_READ_TIMEOUT_SECONDS = 120
+BEDROCK_CLIENT_CONFIG = Config(read_timeout=BEDROCK_READ_TIMEOUT_SECONDS)
+
 
 def _error_code(exc: ClientError) -> str:
     return exc.response.get("Error", {}).get("Code", "")
@@ -80,10 +94,14 @@ def _is_retryable(exc: BaseException) -> bool:
 
 
 class BedrockProvider(LLMProvider):
+    capabilities = ("output_format", "thinking", "effort")
+
     def __init__(self, config: BedrockConfig, boto_client=None):
         super().__init__()
         self._client = boto_client or boto3.client(
-            "bedrock-runtime", region_name=config.region
+            "bedrock-runtime",
+            region_name=config.region,
+            config=BEDROCK_CLIENT_CONFIG,
         )
         self._inference_profiles = config.inference_profiles
         self._profile_invalid_since: dict[str, float] = {}
@@ -109,7 +127,9 @@ class BedrockProvider(LLMProvider):
             response = self._converse(request, model, model)
         usage = response.get("usage", {})
         return LLMResponse(
-            output=_extract_output(response),
+            output=_extract_output(
+                response, json_output=request.output_format is not None
+            ),
             input_tokens=usage.get("inputTokens", 0),
             output_tokens=usage.get("outputTokens", 0),
         )
@@ -144,6 +164,7 @@ class BedrockProvider(LLMProvider):
             exception_type=ClientError,
             is_rejection=_is_temperature_rejection,
             log_event="bedrock_temperature_unsupported",
+            omit_temperature=omits_temperature(request),
         )
 
     def classify_error(self, exc: BaseException) -> ErrorDisposition:
@@ -178,7 +199,37 @@ def _build_converse_kwargs(
     }
     if request.tools:
         kwargs["toolConfig"] = _build_tool_config(request)
+    if request.output_format is not None:
+        kwargs["outputConfig"] = _build_output_config(request)
+        # A refusal comes back as stopReason content_filtered, which Bedrock
+        # guardrails use too. Claude's stop_details tells them apart.
+        kwargs["additionalModelResponseFieldPaths"] = ["/stop_details"]
+    additional_fields: dict = {}
+    if request.thinking is not None:
+        additional_fields["thinking"] = {"type": request.thinking}
+    if request.effort is not None:
+        additional_fields["output_config"] = {"effort": request.effort}
+    if additional_fields:
+        kwargs["additionalModelRequestFields"] = additional_fields
     return kwargs
+
+
+def _build_output_config(request: ContractRequest) -> dict:
+    output_format = request.output_format
+    assert output_format is not None
+    # Converse takes the schema as a JSON string.
+    json_schema: dict = {
+        "schema": json.dumps(output_format.schema),
+        "name": output_format.name,
+    }
+    if output_format.description:
+        json_schema["description"] = output_format.description
+    return {
+        "textFormat": {
+            "type": "json_schema",
+            "structure": {"jsonSchema": json_schema},
+        }
+    }
 
 
 def _build_tool_config(request: ContractRequest) -> dict:
@@ -195,20 +246,30 @@ def _build_tool_config(request: ContractRequest) -> dict:
     return tool_config
 
 
-def _extract_output(response: dict) -> dict:
+def _extract_output(response: dict, *, json_output: bool = False) -> dict:
     output_message = response.get("output", {}).get("message", {})
     content = output_message.get("content", [])
 
-    output_text = ""
+    # Thinking arrives as ``reasoningContent`` blocks, which have no ``text`` key.
+    texts: list[str] = []
     tool_uses = []
     for block in content:
         if block.get("text"):
-            output_text += block["text"]
+            texts.append(block["text"])
         elif block.get("toolUse"):
             tool_use = block["toolUse"]
             if "input" in tool_use:
                 tool_uses.append(tool_use["input"])
-
-    if tool_uses:
-        return {"output_text": output_text, "tool_uses": tool_uses}
-    return {"output_text": output_text}
+    stop_reason = response.get("stopReason")
+    refusal_category = None
+    stop_details = response.get("additionalModelResponseFields", {}).get("stop_details")
+    if isinstance(stop_details, dict) and stop_details.get("type") == "refusal":
+        stop_reason = "refusal"
+        refusal_category = stop_details.get("category")
+    return build_output(
+        texts,
+        tool_uses,
+        json_output=json_output,
+        stop_reason=stop_reason,
+        refusal_category=refusal_category,
+    )

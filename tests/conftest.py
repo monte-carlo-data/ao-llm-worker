@@ -62,12 +62,14 @@ TTL created_at + INTERVAL 30 DAY DELETE
 # Mirrors the helm sql/ migration for otel_traces.llm_worker_info. The worker
 # publishes its (cloud, provider); ReplacingMergeTree(updated_at) keeps a single
 # current row per (cloud, provider) so re-publishing on each startup is idempotent.
+# capabilities mirrors the later migration that adds the column.
 CREATE_WORKER_INFO_TABLE = """
 CREATE TABLE IF NOT EXISTS llm_worker_info
 (
-    cloud       LowCardinality(String),
-    provider    LowCardinality(String),
-    updated_at  DateTime DEFAULT now()
+    cloud         LowCardinality(String),
+    provider      LowCardinality(String),
+    updated_at    DateTime DEFAULT now(),
+    capabilities  Array(LowCardinality(String)) DEFAULT []
 )
 ENGINE = ReplacingMergeTree(updated_at)
 ORDER BY (cloud, provider)

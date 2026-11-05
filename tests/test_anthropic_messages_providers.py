@@ -14,7 +14,7 @@ import httpx
 import pytest
 
 from llm_worker.config import FoundryConfig, VertexConfig
-from llm_worker.contract import ContractRequest, Tool
+from llm_worker.contract import ContractRequest, OutputFormat, Tool
 from llm_worker.providers.base import ErrorDisposition
 from llm_worker.providers.foundry import FoundryProvider
 from llm_worker.providers.vertex import VertexProvider
@@ -271,3 +271,159 @@ class TestClassifyError:
     def test_generic_exception_fails_row(self, backend, mocker):
         provider = backend.make(mocker.Mock())
         assert provider.classify_error(ValueError("boom")) == ErrorDisposition.FAIL_ROW
+
+
+_SCHEMA = {
+    "type": "object",
+    "properties": {"score": {"type": "number"}},
+    "required": ["score"],
+    "additionalProperties": False,
+}
+
+
+def _profiled_req(backend, *, thinking="adaptive", effort=None):
+    return ContractRequest(
+        model_id=backend.model_ref,
+        prompt="judge this",
+        max_output_tokens=4012,
+        temperature=0.0,
+        tools=[],
+        forced_tool=None,
+        output_format=OutputFormat("evaluation_result", "Return the result", _SCHEMA),
+        thinking=thinking,
+        effort=effort,
+    )
+
+
+def _profiled_response(blocks, stop_reason="end_turn", stop_details=None):
+    response = _response(blocks)
+    response.stop_reason = stop_reason
+    response.stop_details = stop_details
+    return response
+
+
+class TestRequestProfiles:
+    def test_sends_json_outputs_thinking_and_effort(self, backend, mocker):
+        client = mocker.Mock()
+        client.messages.create.return_value = _profiled_response([_text_block('{"score": 1}')])
+
+        backend.make(client).complete(_profiled_req(backend, effort="high"))
+
+        kwargs = client.messages.create.call_args.kwargs
+        assert kwargs["output_config"] == {
+            "format": {"type": "json_schema", "schema": _SCHEMA},
+            "effort": "high",
+        }
+        assert kwargs["thinking"] == {"type": "adaptive"}
+        assert kwargs["max_tokens"] == 4012
+        assert "tools" not in kwargs
+        assert "tool_choice" not in kwargs
+
+    def test_sends_no_effort_when_unset(self, backend, mocker):
+        client = mocker.Mock()
+        client.messages.create.return_value = _profiled_response([_text_block('{"score": 1}')])
+
+        backend.make(client).complete(_profiled_req(backend))
+
+        assert client.messages.create.call_args.kwargs["output_config"] == {
+            "format": {"type": "json_schema", "schema": _SCHEMA}
+        }
+
+    def test_sends_no_temperature_with_thinking(self, backend, mocker):
+        client = mocker.Mock()
+        client.messages.create.return_value = _profiled_response([_text_block('{"score": 1}')])
+
+        backend.make(client).complete(_profiled_req(backend))
+
+        client.messages.create.assert_called_once()
+        assert "temperature" not in client.messages.create.call_args.kwargs
+
+    def test_existing_requests_send_no_new_fields(self, backend, mocker):
+        client = mocker.Mock()
+        client.messages.create.return_value = _response([_text_block("ok")])
+
+        backend.make(client).complete(_req(backend))
+
+        kwargs = client.messages.create.call_args.kwargs
+        assert "output_config" not in kwargs
+        assert "thinking" not in kwargs
+        assert kwargs["temperature"] == 0.0
+
+    def test_stores_the_json_reply_as_the_tool_input(self, backend, mocker):
+        client = mocker.Mock()
+        thinking = SimpleNamespace(type="thinking", thinking="let me think")
+        client.messages.create.return_value = _profiled_response(
+            [thinking, _text_block('{"score": 4}')]
+        )
+
+        response = backend.make(client).complete(_profiled_req(backend))
+
+        assert response.output == {"output_text": '{"score": 4}', "tool_uses": [{"score": 4}]}
+
+    def test_records_a_refusal_without_a_result(self, backend, mocker):
+        client = mocker.Mock()
+        client.messages.create.return_value = _profiled_response(
+            [],
+            stop_reason="refusal",
+            stop_details=SimpleNamespace(type="refusal", category="frontier_llm"),
+        )
+
+        response = backend.make(client).complete(_profiled_req(backend))
+
+        assert response.output == {
+            "output_text": "",
+            "stop_reason": "refusal",
+            "refusal_category": "frontier_llm",
+        }
+
+    def test_records_a_token_cap_stop_without_a_result(self, backend, mocker):
+        client = mocker.Mock()
+        client.messages.create.return_value = _profiled_response(
+            [_text_block('{"score": ')], stop_reason="max_tokens"
+        )
+
+        response = backend.make(client).complete(_profiled_req(backend))
+
+        assert "tool_uses" not in response.output
+        assert response.output["stop_reason"] == "max_tokens"
+        assert response.output["result_error"] == "reply is not a JSON object"
+
+    def test_a_token_cap_stop_that_still_parses_is_not_a_result(self, backend, mocker):
+        client = mocker.Mock()
+        client.messages.create.return_value = _profiled_response(
+            [_text_block('{"score": 1}')], stop_reason="max_tokens"
+        )
+
+        response = backend.make(client).complete(_profiled_req(backend))
+
+        assert response.output == {
+            "output_text": '{"score": 1}',
+            "result_error": "reply did not finish",
+            "stop_reason": "max_tokens",
+        }
+
+    def test_records_a_reply_that_is_not_a_json_object(self, backend, mocker):
+        client = mocker.Mock()
+        client.messages.create.return_value = _profiled_response([_text_block("[1, 2]")])
+
+        response = backend.make(client).complete(_profiled_req(backend))
+
+        assert "tool_uses" not in response.output
+        assert response.output["stop_reason"] == "end_turn"
+
+    def test_json_outputs_alone_send_no_temperature(self, backend, mocker):
+        client = mocker.Mock()
+        client.messages.create.return_value = _profiled_response(
+            [_text_block('{"score": 1}')]
+        )
+
+        backend.make(client).complete(_profiled_req(backend, thinking=None))
+
+        client.messages.create.assert_called_once()
+        kwargs = client.messages.create.call_args.kwargs
+        assert "temperature" not in kwargs
+        assert "thinking" not in kwargs
+
+    def test_publishes_all_request_profile_capabilities(self, backend, mocker):
+        provider = backend.make(mocker.Mock())
+        assert provider.capabilities == ("output_format", "thinking", "effort")

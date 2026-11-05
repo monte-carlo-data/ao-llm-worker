@@ -29,7 +29,7 @@ Apache License, Version 2.0
       Copyright 2022-2024 ClickHouse, Inc.
       https://github.com/ClickHouse/clickhouse-connect
       LICENSES/clickhouse-connect/licenses/LICENSE
-   2. cryptography 49.0.0  [Apache-2.0 OR BSD-3-Clause]
+   2. cryptography 50.0.0  [Apache-2.0 OR BSD-3-Clause]
       Copyright (c) Individual contributors.
       https://github.com/pyca/cryptography
       LICENSES/cryptography/licenses/LICENSE, LICENSES/cryptography/licenses/LICENSE.APACHE, LICENSES/cryptography/licenses/LICENSE.BSD
@@ -48,7 +48,7 @@ Apache License, Version 2.0
       LICENSES/tenacity/licenses/LICENSE
 
 Mozilla Public License 2.0
-   1. certifi 2026.2.25  [Mozilla Public License 2.0 (MPL 2.0)]
+   1. certifi 2026.10.23  [Mozilla Public License 2.0 (MPL 2.0)]
       https://github.com/certifi/python-certifi
       LICENSES/certifi/licenses/LICENSE
 
@@ -93,7 +93,7 @@ MIT License
       Copyright 2023 Anthropic, PBC.
       https://github.com/anthropics/anthropic-sdk-python
       LICENSES/anthropic/licenses/LICENSE
-   3. anyio 4.14.1
+   3. anyio 4.14.2
       Copyright (c) 2018 Alex Grönholm
       https://github.com/agronholm/anyio
       LICENSES/anyio/licenses/LICENSE
@@ -140,7 +140,7 @@ MIT License
       Copyright (c) 2022 Samuel Colvin
       https://github.com/pydantic/pydantic
       LICENSES/pydantic-core/licenses/LICENSE
-  15. PyJWT 2.13.0
+  15. PyJWT 2.15.1
       Copyright (c) 2015-2022 José Padilla
       https://github.com/jpadilla/pyjwt
       LICENSES/pyjwt/licenses/AUTHORS.rst, LICENSES/pyjwt/licenses/LICENSE
@@ -152,7 +152,7 @@ MIT License
       Copyright (c) Pydantic Services Inc. 2025 to present
       https://github.com/pydantic/typing-inspection
       LICENSES/typing-inspection/licenses/LICENSE
-  18. urllib3 2.7.0
+  18. urllib3 2.8.0
       Copyright (c) 2008-2020 Andrey Petrov and contributors.
       https://github.com/urllib3/urllib3
       LICENSES/urllib3/licenses/LICENSE.txt

@@ -1,8 +1,9 @@
 """ClickHouse client for llm_inputs and llm_results tables."""
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import clickhouse_connect
 from clickhouse_connect.driver.client import Client
@@ -41,6 +42,7 @@ class ClickHouseClient:
     ):
         self._pending_batch_limit = pending_batch_limit
         self._batch_page_size = batch_page_size
+        self._warned_no_capabilities_column = False
         if client:
             self._client = client
         elif config:
@@ -56,19 +58,68 @@ class ClickHouseClient:
         else:
             raise ValueError("Either config or client must be provided")
 
-    def write_worker_info(self, cloud: str, provider: str) -> None:
-        """Publish this worker's cloud + provider so the monolith can resolve
-        the deployment's cloud-native model pool. The table defaults updated_at
-        to now(); a ReplacingMergeTree keyed on (cloud, provider) keeps a single
-        current row, so re-publishing on every startup is cheap and idempotent.
+    def write_worker_info(
+        self, cloud: str, provider: str, capabilities: Sequence[str]
+    ) -> None:
+        """Publish this worker's cloud, provider and capabilities.
+
+        The monolith reads the cloud to pick the deployment's cloud-native model
+        pool, and the capabilities to decide which models it can offer. The table
+        defaults updated_at to now(); a ReplacingMergeTree keyed on (cloud, provider)
+        keeps a single current row, so re-publishing is cheap and idempotent.
+
+        On an older chart without the ``capabilities`` column, only the cloud and
+        provider are written. The worker republishes periodically, so the
+        capabilities land once the chart's migration adds the column.
+
+        Each write sends a new deduplication token. A replicated table drops an insert
+        block it has already accepted, and this block repeats on every republish, so
+        without the token a republish couldn't replace a newer row written by
+        something else, such as an older chart's schema job.
         """
+        settings = {"async_insert": 0, "insert_deduplication_token": str(uuid4())}
+        if self._has_capabilities_column():
+            self._client.insert(
+                "llm_worker_info",
+                [[cloud, provider, list(capabilities)]],
+                column_names=["cloud", "provider", "capabilities"],
+                settings=settings,
+            )
+            logger.info(
+                "worker_info_written",
+                extra={
+                    "cloud": cloud,
+                    "provider": provider,
+                    "capabilities": list(capabilities),
+                },
+            )
+            return
         self._client.insert(
             "llm_worker_info",
             [[cloud, provider]],
             column_names=["cloud", "provider"],
-            settings={"async_insert": 0},
+            settings=settings,
         )
-        logger.info("worker_info_written", extra={"cloud": cloud, "provider": provider})
+        extra = {"cloud": cloud, "provider": provider}
+        if self._warned_no_capabilities_column:
+            logger.debug("worker_info_written_without_capabilities", extra=extra)
+        else:
+            self._warned_no_capabilities_column = True
+            logger.warning("worker_info_written_without_capabilities", extra=extra)
+
+    def _has_capabilities_column(self) -> bool:
+        # Checked up front, not by parsing an insert error: the chart's schema Job
+        # and the worker roll out together, so the column can still be missing.
+        result = self._client.query(
+            """
+            SELECT count()
+            FROM system.columns
+            WHERE database = currentDatabase()
+              AND table = 'llm_worker_info'
+              AND name = 'capabilities'
+        """
+        )
+        return result.result_rows[0][0] > 0
 
     def get_pending_batches(self) -> list[UUID]:
         result = self._client.query(
