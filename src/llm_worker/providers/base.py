@@ -17,6 +17,11 @@ ExcT = TypeVar("ExcT", bound=BaseException)
 
 _TEMPERATURE_REJECTION_KEYWORDS = ("not support", "unsupported", "deprecated")
 
+# Stop reasons of a reply that finished on its own. A JSON reply that stopped any
+# other way, such as at the token cap or with Bedrock's malformed_model_output, isn't
+# a result even when its text parses.
+_FINISHED_STOP_REASONS = frozenset({"end_turn", "stop_sequence"})
+
 
 def is_temperature_rejection_message(message: str) -> bool:
     """True if a backend error message reads like a model rejecting a custom
@@ -48,13 +53,13 @@ def build_output(
     ``output_text`` joins the text blocks. Without JSON outputs, ``tool_uses`` holds
     the tool calls' inputs and is omitted when empty.
 
-    With JSON outputs, the last text block holds the JSON. A reply that parses as a
-    JSON object is stored as ``tool_uses[0]``, where a forced tool call's input goes.
-    Any other reply still completes the row, without ``tool_uses``, and records why:
-    the stop reason, the refusal category when the backend gives one, and
-    ``result_error`` when the text isn't a JSON object. A refusal or a token-cap stop
-    isn't an API error, so it never fails the row; the monolith drops rows without a
-    result.
+    With JSON outputs, the last text block holds the JSON. A reply that finished on
+    its own and parses as a JSON object is stored as ``tool_uses[0]``, where a forced
+    tool call's input goes. Any other reply still completes the row, without
+    ``tool_uses``, and records why: the stop reason, the refusal category when the
+    backend gives one, and ``result_error`` unless it's a refusal. A refusal or a
+    token-cap stop isn't an API error, so it never fails the row; the monolith drops
+    rows without a result.
 
     Args:
         texts: The reply's text blocks in order. Thinking blocks aren't text
@@ -70,10 +75,13 @@ def build_output(
             parsed = json.loads(texts[-1]) if texts else None
         except ValueError:
             parsed = None
-        if isinstance(parsed, dict):
+        if not isinstance(parsed, dict):
+            output["result_error"] = "reply is not a JSON object"
+        elif stop_reason in _FINISHED_STOP_REASONS:
             output["tool_uses"] = [parsed]
             return output
-        output["result_error"] = "reply is not a JSON object"
+        else:
+            output["result_error"] = "reply did not finish"
     output["stop_reason"] = stop_reason or ""
     if refusal_category:
         output["refusal_category"] = refusal_category

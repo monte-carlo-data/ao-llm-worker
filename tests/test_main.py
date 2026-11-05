@@ -9,6 +9,7 @@ from clickhouse_connect.driver.exceptions import ClickHouseError
 from llm_worker.clickhouse import LLMResult
 from llm_worker.main import (
     WORKER_INFO_REPUBLISH_SECONDS,
+    WORKER_INFO_RETRY_SECONDS,
     LLMWorkerService,
     WorkerInfo,
     run,
@@ -448,15 +449,25 @@ class TestWorkerInfoPublishing:
 
         assert ch.write_worker_info.call_count == 3
 
-    def test_a_failed_publish_is_logged_and_retried_after_the_interval(self, mocker):
+    def test_a_failed_publish_is_retried_sooner(self, mocker):
         ch = MagicMock()
-        ch.write_worker_info.side_effect = [RuntimeError("boom"), None]
+        ch.write_worker_info.side_effect = [RuntimeError("boom"), None, None]
         service, clock = self._service(mocker, ch)
 
         service._maybe_publish_worker_info()
-        clock.return_value = 1000.0 + WORKER_INFO_REPUBLISH_SECONDS
+        clock.return_value = 1000.0 + WORKER_INFO_RETRY_SECONDS - 1
         service._maybe_publish_worker_info()
+        assert ch.write_worker_info.call_count == 1
 
+        clock.return_value = 1000.0 + WORKER_INFO_RETRY_SECONDS
+        service._maybe_publish_worker_info()
+        assert ch.write_worker_info.call_count == 2
+
+        # After the retry succeeds, the regular interval applies again.
+        clock.return_value = (
+            1000.0 + WORKER_INFO_RETRY_SECONDS + WORKER_INFO_REPUBLISH_SECONDS - 1
+        )
+        service._maybe_publish_worker_info()
         assert ch.write_worker_info.call_count == 2
 
     def test_a_failed_publish_does_not_stop_the_poll_loop(self, mocker):

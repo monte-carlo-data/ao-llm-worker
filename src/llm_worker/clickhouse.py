@@ -3,7 +3,7 @@
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import clickhouse_connect
 from clickhouse_connect.driver.client import Client
@@ -71,13 +71,19 @@ class ClickHouseClient:
         On an older chart without the ``capabilities`` column, only the cloud and
         provider are written. The worker republishes periodically, so the
         capabilities land once the chart's migration adds the column.
+
+        Each write sends a new deduplication token. A replicated table drops an insert
+        block it has already accepted, and this block repeats on every republish, so
+        without the token a republish couldn't replace a newer row written by
+        something else, such as an older chart's schema job.
         """
+        settings = {"async_insert": 0, "insert_deduplication_token": str(uuid4())}
         if self._has_capabilities_column():
             self._client.insert(
                 "llm_worker_info",
                 [[cloud, provider, list(capabilities)]],
                 column_names=["cloud", "provider", "capabilities"],
-                settings={"async_insert": 0},
+                settings=settings,
             )
             logger.info(
                 "worker_info_written",
@@ -92,7 +98,7 @@ class ClickHouseClient:
             "llm_worker_info",
             [[cloud, provider]],
             column_names=["cloud", "provider"],
-            settings={"async_insert": 0},
+            settings=settings,
         )
         extra = {"cloud": cloud, "provider": provider}
         if self._warned_no_capabilities_column:

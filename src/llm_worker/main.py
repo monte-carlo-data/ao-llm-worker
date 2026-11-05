@@ -33,6 +33,8 @@ BATCH_STATUS_WRITE_MAX_ATTEMPTS = 3
 # schema Job and the worker roll out together, so the capabilities column can appear
 # after startup; republishing picks it up without a restart.
 WORKER_INFO_REPUBLISH_SECONDS = 600
+# A failed write, such as at startup before ClickHouse is reachable, retries sooner.
+WORKER_INFO_RETRY_SECONDS = 30
 
 
 @dataclass(frozen=True)
@@ -58,7 +60,7 @@ class LLMWorkerService:
         self._poll_interval = poll_interval
         self._should_stop = False
         self._worker_info = worker_info
-        self._worker_info_attempted_at: float | None = None
+        self._worker_info_next_at: float | None = None
 
     def run(self) -> None:
         self._install_signal_handlers()
@@ -86,22 +88,20 @@ class LLMWorkerService:
         """Publish the worker info at startup, then every WORKER_INFO_REPUBLISH_SECONDS.
 
         Called from the poll loop and between pages of a batch, so a long backlog
-        can't delay it. Best-effort: a failure is logged and never stops batch
-        processing.
+        can't delay it. Best-effort: a failure is logged, retried after
+        WORKER_INFO_RETRY_SECONDS, and never stops batch processing.
         """
         now = time.monotonic()
-        attempted_at = self._worker_info_attempted_at
-        if (
-            attempted_at is not None
-            and now - attempted_at < WORKER_INFO_REPUBLISH_SECONDS
-        ):
+        if self._worker_info_next_at is not None and now < self._worker_info_next_at:
             return
-        self._worker_info_attempted_at = now
         info = self._worker_info
         try:
             self._ch.write_worker_info(info.cloud, info.provider, info.capabilities)
         except Exception as exc:  # noqa: BLE001 — best-effort metadata write
             logger.warning("worker_info_write_failed", extra={"error": str(exc)})
+            self._worker_info_next_at = now + WORKER_INFO_RETRY_SECONDS
+            return
+        self._worker_info_next_at = now + WORKER_INFO_REPUBLISH_SECONDS
 
     def process_single_batch(self, batch_id: UUID) -> None:
         saw_rows = False

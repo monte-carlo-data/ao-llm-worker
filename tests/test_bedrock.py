@@ -604,6 +604,11 @@ class TestRequestProfiles:
         kw = _build_converse_kwargs(_req())
         assert "outputConfig" not in kw
         assert "additionalModelRequestFields" not in kw
+        assert "additionalModelResponseFieldPaths" not in kw
+
+    def test_json_outputs_ask_for_the_stop_details(self):
+        kw = _build_converse_kwargs(_profiled_req())
+        assert kw["additionalModelResponseFieldPaths"] == ["/stop_details"]
 
     def test_sends_no_temperature_with_thinking(self, mocker):
         client = mocker.Mock()
@@ -635,6 +640,44 @@ class TestRequestProfiles:
             "stop_reason": "max_tokens",
         }
 
+    @pytest.mark.parametrize("stop_reason", ["max_tokens", "malformed_model_output"])
+    def test_a_reply_that_did_not_finish_is_not_a_result(self, stop_reason):
+        output = _extract_output(
+            _json_response('{"score": 1}', stop_reason=stop_reason), json_output=True
+        )
+        assert output == {
+            "output_text": '{"score": 1}',
+            "result_error": "reply did not finish",
+            "stop_reason": stop_reason,
+        }
+
+    def test_a_stop_sequence_reply_is_a_result(self):
+        output = _extract_output(
+            _json_response('{"score": 1}', stop_reason="stop_sequence"),
+            json_output=True,
+        )
+        assert output["tool_uses"] == [{"score": 1}]
+
+    def test_records_a_refusal_and_its_category(self):
+        # The shape Bedrock returned for Sonnet 5.5 and Opus 5.5 on dev.
+        response = {
+            "output": {"message": {"content": []}},
+            "stopReason": "content_filtered",
+            "additionalModelResponseFields": {
+                "stop_details": {
+                    "type": "refusal",
+                    "category": "reasoning_extraction",
+                    "explanation": "This request was blocked.",
+                }
+            },
+        }
+        output = _extract_output(response, json_output=True)
+        assert output == {
+            "output_text": "",
+            "stop_reason": "refusal",
+            "refusal_category": "reasoning_extraction",
+        }
+
     def test_records_a_reply_without_text(self):
         response = {
             "output": {"message": {"content": []}},
@@ -645,18 +688,19 @@ class TestRequestProfiles:
         assert output["stop_reason"] == "content_filtered"
 
 
-def test_client_waits_120_seconds_and_leaves_retries_to_the_executor(mocker):
+def test_client_waits_120_seconds_and_keeps_botocore_retries(mocker):
     boto_client = mocker.patch("llm_worker.providers.bedrock.boto3.client")
 
     BedrockProvider(BedrockConfig(region="us-east-1", inference_profiles={}))
 
     config = boto_client.call_args.kwargs["config"]
     assert config.read_timeout >= 120
-    assert config.retries == {"total_max_attempts": 1}
+    # botocore's retries absorb throttling for every Bedrock model.
+    assert config.retries is None
 
 
-def test_publishes_no_effort_capability_until_it_is_tested_on_dev():
-    assert BedrockProvider.capabilities == ("output_format", "thinking")
+def test_publishes_all_request_profile_capabilities():
+    assert BedrockProvider.capabilities == ("output_format", "thinking", "effort")
 
 
 def test_json_outputs_alone_send_no_temperature(mocker):

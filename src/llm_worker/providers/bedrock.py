@@ -11,7 +11,8 @@ else.
 
 A JSON-outputs request maps to Converse's ``outputConfig.textFormat``. Converse has
 no fields for Claude's thinking and effort, so they go through
-``additionalModelRequestFields`` in the Messages API's own shape.
+``additionalModelRequestFields`` in the Messages API's own shape. A refusal's
+``stop_details`` comes back through ``additionalModelResponseFields``.
 """
 
 import json
@@ -70,14 +71,10 @@ _PROFILE_ARN_ERROR_CODES = {"ResourceNotFoundException"}
 _PROFILE_ARN_COOLDOWN_SECONDS = 300
 
 # botocore's default read timeout is 60s. Bedrock compiles a new JSON-outputs schema
-# on its first request, which can take about 90s.
+# on its first request, and thinking makes replies longer. botocore keeps its own
+# retries, which absorb throttling inside each executor attempt.
 BEDROCK_READ_TIMEOUT_SECONDS = 120
-# botocore's own retries are off: the executor's tenacity loop owns retries, and
-# stacking both would multiply attempts and the time a row can take.
-BEDROCK_CLIENT_CONFIG = Config(
-    read_timeout=BEDROCK_READ_TIMEOUT_SECONDS,
-    retries={"total_max_attempts": 1},
-)
+BEDROCK_CLIENT_CONFIG = Config(read_timeout=BEDROCK_READ_TIMEOUT_SECONDS)
 
 
 def _error_code(exc: ClientError) -> str:
@@ -98,10 +95,7 @@ def _is_retryable(exc: BaseException) -> bool:
 
 
 class BedrockProvider(LLMProvider):
-    # No "effort" yet. Effort goes through additionalModelRequestFields as
-    # output_config.effort, which Converse may merge with or reject next to
-    # outputConfig.textFormat. Add it once that's been tested on dev.
-    capabilities = ("output_format", "thinking")
+    capabilities = ("output_format", "thinking", "effort")
 
     def __init__(self, config: BedrockConfig, boto_client=None):
         super().__init__()
@@ -208,6 +202,9 @@ def _build_converse_kwargs(
         kwargs["toolConfig"] = _build_tool_config(request)
     if request.output_format is not None:
         kwargs["outputConfig"] = _build_output_config(request)
+        # A refusal comes back as stopReason content_filtered, which Bedrock
+        # guardrails use too. Claude's stop_details tells them apart.
+        kwargs["additionalModelResponseFieldPaths"] = ["/stop_details"]
     additional_fields: dict = {}
     if request.thinking is not None:
         additional_fields["thinking"] = {"type": request.thinking}
@@ -264,11 +261,16 @@ def _extract_output(response: dict, *, json_output: bool = False) -> dict:
             tool_use = block["toolUse"]
             if "input" in tool_use:
                 tool_uses.append(tool_use["input"])
-    # Converse has no ``refusal`` stop reason and no refusal category, so a refusal
-    # is recorded under whatever stop reason Converse maps it to.
+    stop_reason = response.get("stopReason")
+    refusal_category = None
+    stop_details = response.get("additionalModelResponseFields", {}).get("stop_details")
+    if isinstance(stop_details, dict) and stop_details.get("type") == "refusal":
+        stop_reason = "refusal"
+        refusal_category = stop_details.get("category")
     return build_output(
         texts,
         tool_uses,
         json_output=json_output,
-        stop_reason=response.get("stopReason"),
+        stop_reason=stop_reason,
+        refusal_category=refusal_category,
     )

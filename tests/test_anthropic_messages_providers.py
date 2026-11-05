@@ -388,6 +388,20 @@ class TestRequestProfiles:
         assert response.output["stop_reason"] == "max_tokens"
         assert response.output["result_error"] == "reply is not a JSON object"
 
+    def test_a_token_cap_stop_that_still_parses_is_not_a_result(self, backend, mocker):
+        client = mocker.Mock()
+        client.messages.create.return_value = _profiled_response(
+            [_text_block('{"score": 1}')], stop_reason="max_tokens"
+        )
+
+        response = backend.make(client).complete(_profiled_req(backend))
+
+        assert response.output == {
+            "output_text": '{"score": 1}',
+            "result_error": "reply did not finish",
+            "stop_reason": "max_tokens",
+        }
+
     def test_records_a_reply_that_is_not_a_json_object(self, backend, mocker):
         client = mocker.Mock()
         client.messages.create.return_value = _profiled_response([_text_block("[1, 2]")])
@@ -410,6 +424,6 @@ class TestRequestProfiles:
         assert "temperature" not in kwargs
         assert "thinking" not in kwargs
 
-    def test_publishes_all_request_profile_capabilities(self, backend, mocker):
+    def test_publishes_no_effort_capability_until_it_is_tried(self, backend, mocker):
         provider = backend.make(mocker.Mock())
-        assert provider.capabilities == ("output_format", "thinking", "effort")
+        assert provider.capabilities == ("output_format", "thinking")

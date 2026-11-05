@@ -52,3 +52,20 @@ def test_warns_once_about_a_missing_column_then_logs_at_debug(caplog):
         if r.message == "worker_info_written_without_capabilities"
     ]
     assert levels == [logging.WARNING, logging.DEBUG, logging.DEBUG]
+
+
+def test_every_write_sends_a_new_deduplication_token():
+    # A replicated table drops a repeated insert block, so an identical republish
+    # couldn't replace a newer row without a fresh token.
+    for has_column in (True, False):
+        ch, raw = _client(has_capabilities_column=has_column)
+
+        ch.write_worker_info("azure", "foundry", CAPABILITIES)
+        ch.write_worker_info("azure", "foundry", CAPABILITIES)
+
+        tokens = [
+            call.kwargs["settings"]["insert_deduplication_token"]
+            for call in raw.insert.call_args_list
+        ]
+        assert len(set(tokens)) == 2
+        assert all(tokens)
