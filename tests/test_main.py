@@ -11,6 +11,7 @@ from llm_worker.clickhouse import LLMResult
 from llm_worker.executor import Deferred
 from llm_worker.main import (
     WORKER_INFO_REPUBLISH_SECONDS,
+    BatchTurn,
     WORKER_INFO_RETRY_SECONDS,
     LLMWorkerService,
     WorkerInfo,
@@ -290,6 +291,48 @@ class TestDeferredRows:
         service.process_single_batch(BATCH_1)
 
         assert ch.write_batch_status.call_args.args[1] == "complete"
+
+    def test_turn_reports_deferred_rows(self):
+        ch = MagicMock()
+        executor = MagicMock()
+        ch.get_batch_rows.side_effect = [[MagicMock()] * 3, []]
+        ch.get_batch_counts.return_value = (3, 1, 0)
+        executor.process_batch_iter.return_value = iter(
+            [self._complete(1), self._deferred(2), self._deferred(3)]
+        )
+        service = _make_service(ch_mock=ch, executor_mock=executor)
+
+        assert service.process_single_batch(BATCH_1) == BatchTurn(deferred_rows=2)
+
+    def test_completed_turn_reports_no_deferred_rows(self):
+        ch = MagicMock()
+        executor = MagicMock()
+        ch.get_batch_rows.side_effect = [[MagicMock()], []]
+        ch.get_batch_counts.return_value = (1, 1, 0)
+        executor.process_batch_iter.return_value = iter([self._complete(1)])
+        service = _make_service(ch_mock=ch, executor_mock=executor)
+
+        assert service.process_single_batch(BATCH_1) == BatchTurn(deferred_rows=0)
+
+
+class TestStopBetweenPages:
+    def test_stop_ends_the_turn_before_the_next_page(self):
+        ch = MagicMock()
+        executor = MagicMock()
+        ch.get_batch_rows.side_effect = [[MagicMock()], [MagicMock()], []]
+        service = _make_service(ch_mock=ch, executor_mock=executor)
+        result = LLMResult(BATCH_1, UUID(int=1), '{"output_text":"ok"}', "complete", "")
+
+        def first_page(rows):
+            service.stop()  # SIGTERM arrives while the first page runs
+            return iter([result])
+
+        executor.process_batch_iter.side_effect = first_page
+
+        assert service.process_single_batch(BATCH_1) == BatchTurn(deferred_rows=0)
+        assert ch.get_batch_rows.call_count == 1
+        ch.write_results.assert_called_once_with([result])
+        ch.write_batch_status.assert_not_called()
 
 
 class TestBatchPaging:

@@ -40,6 +40,17 @@ WORKER_INFO_RETRY_SECONDS = 30
 
 
 @dataclass(frozen=True)
+class BatchTurn:
+    """What one turn on a batch did, for the caller's scheduling.
+
+    ``deferred_rows`` counts rows left without a result because the backend
+    throttled them; the batch stays pending and a later turn retries them.
+    """
+
+    deferred_rows: int = 0
+
+
+@dataclass(frozen=True)
 class WorkerInfo:
     """What the worker publishes to llm_worker_info."""
 
@@ -117,11 +128,17 @@ class LLMWorkerService:
             return
         self._worker_info_next_at = now + WORKER_INFO_REPUBLISH_SECONDS
 
-    def process_single_batch(self, batch_id: UUID) -> None:
+    def process_single_batch(self, batch_id: UUID) -> BatchTurn:
         saw_rows = False
         deferred_rows = 0
 
         while True:
+            # A stopping worker doesn't start another page. The batch keeps its
+            # remaining rows and stays pending for the next worker.
+            if self._should_stop:
+                logger.info("batch_interrupted", extra={"batch_id": str(batch_id)})
+                return BatchTurn(deferred_rows)
+
             rows = self._ch.get_batch_rows(batch_id)
             if not rows:
                 break
@@ -156,7 +173,7 @@ class LLMWorkerService:
                     "failed": total_failed,
                 },
             )
-            return
+            return BatchTurn(deferred_rows)
 
         if not saw_rows:
             total_rows, total_completed, total_failed = self._ch.get_batch_counts(
@@ -193,6 +210,7 @@ class LLMWorkerService:
             "batch_status_written",
             extra={"batch_id": str(batch_id), "status": "complete"},
         )
+        return BatchTurn()
 
     def _write_results_in_chunks(self, results: Iterable[RowOutcome]) -> int:
         """Write results in chunks and return how many rows were deferred."""
