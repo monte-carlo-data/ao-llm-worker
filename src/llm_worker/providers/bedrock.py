@@ -52,6 +52,11 @@ RETRYABLE_ERROR_CODES = {
     "InternalServerException",
     "ModelNotReadyException",
     "ServiceUnavailableException",
+}
+
+# Quota rejections. Kept apart from RETRYABLE_ERROR_CODES so the executor can
+# back off instead of spending the row's retry budget.
+THROTTLE_ERROR_CODES = {
     "ThrottlingException",
 }
 
@@ -171,6 +176,8 @@ class BedrockProvider(LLMProvider):
         if isinstance(exc, ClientError):
             if _error_code(exc) == "AccessDeniedException":
                 return ErrorDisposition.ABORT_BATCH
+            if _error_code(exc) in THROTTLE_ERROR_CODES:
+                return ErrorDisposition.THROTTLED
         if _is_retryable(exc):
             return ErrorDisposition.RETRY
         return ErrorDisposition.FAIL_ROW

@@ -22,8 +22,9 @@ def _client_error(code, message="error"):
 
 
 class TestIsRetryable:
-    def test_throttling_is_retryable(self):
-        assert _is_retryable(_client_error("ThrottlingException"))
+    def test_throttling_is_not_retryable(self):
+        # Throttling is classified THROTTLED, not RETRY (see test_bedrock).
+        assert not _is_retryable(_client_error("ThrottlingException"))
 
     def test_service_error_is_retryable(self):
         assert _is_retryable(_client_error("InternalServerException"))

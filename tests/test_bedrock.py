@@ -10,6 +10,7 @@ from llm_worker.providers.base import ErrorDisposition
 from llm_worker.providers.bedrock import (
     NON_RETRYABLE_ERROR_CODES,
     RETRYABLE_ERROR_CODES,
+    THROTTLE_ERROR_CODES,
     BedrockProvider,
     _build_converse_kwargs,
     _extract_output,
@@ -504,8 +505,17 @@ class TestClassifyError:
             "InternalServerException",
             "ModelNotReadyException",
             "ServiceUnavailableException",
-            "ThrottlingException",
         }
+
+    def test_throttle_codes_are_exactly(self):
+        assert THROTTLE_ERROR_CODES == {"ThrottlingException"}
+
+    @pytest.mark.parametrize("code", sorted(THROTTLE_ERROR_CODES))
+    def test_throttle_codes_are_throttled(self, mocker, code):
+        provider = _provider(mocker.Mock())
+        assert (
+            provider.classify_error(_client_error(code)) == ErrorDisposition.THROTTLED
+        )
 
     def test_non_retryable_codes_are_exactly(self):
         assert NON_RETRYABLE_ERROR_CODES == {
