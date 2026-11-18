@@ -7,8 +7,8 @@ from uuid import UUID
 import pytest
 from clickhouse_connect.driver.exceptions import ClickHouseError
 
-from llm_worker.clickhouse import LLMResult
-from llm_worker.executor import Deferred
+from llm_worker.clickhouse import LLMInput, LLMResult
+from llm_worker.executor import BatchExecutor, Deferred
 from llm_worker.main import (
     WORKER_INFO_REPUBLISH_SECONDS,
     BatchTurn,
@@ -752,3 +752,38 @@ class TestPollLoopErrorHandling:
         # restarts, rather than being silently swallowed and spun on.
         with pytest.raises(RuntimeError, match="bug in executor"):
             service.run()
+
+
+class TestSigtermDuringThrottlePause:
+    def test_sigterm_stops_promptly_and_defers_waiting_rows(self):
+        """Real executor and gate: rows waiting out a long pause are deferred,
+        not failed, and run() returns promptly after SIGTERM."""
+        stop_event = threading.Event()
+        gate = ThrottleGate(30.0, 30.0)
+        gate.on_throttle("model-1", call_started_at=gate.now())
+        provider = MagicMock()
+        executor = BatchExecutor(
+            provider, 3, 5, 0, throttle_gate=gate, stop_event=stop_event
+        )
+        ch = MagicMock()
+        ch.get_pending_batches.return_value = [BATCH_1]
+        ch.get_batch_rows.return_value = [
+            LLMInput(BATCH_1, UUID(int=i), "model-1", "hello", "{}", "")
+            for i in range(3)
+        ]
+        ch.get_batch_counts.return_value = (3, 0, 0)
+        service = LLMWorkerService(
+            ch, executor, 30, worker_info=WORKER_INFO, stop_event=stop_event
+        )
+        timer = threading.Timer(0.2, signal.raise_signal, [signal.SIGTERM])
+
+        timer.start()
+        started = time.monotonic()
+        service.run()
+        elapsed = time.monotonic() - started
+        timer.join()
+
+        assert elapsed < 2
+        provider.complete.assert_not_called()
+        ch.write_results.assert_not_called()  # no failed rows
+        ch.write_batch_status.assert_not_called()  # batch stays pending

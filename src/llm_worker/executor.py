@@ -33,6 +33,12 @@ DEFAULT_THROTTLE_PAUSE_MIN_SECONDS = 1.0
 DEFAULT_THROTTLE_PAUSE_MAX_SECONDS = 60.0
 DEFAULT_THROTTLE_MAX_ROW_AGE_SECONDS = 600
 
+# The main thread waits on row futures in slices of this length. Python runs
+# signal handlers on the main thread, and an untimed wait may not wake for a
+# signal on every platform, so SIGTERM could otherwise go unhandled until a row
+# finishes, which can be a whole throttle pause.
+_FUTURES_WAIT_SLICE_SECONDS = 0.5
+
 
 class _Stopped(Exception):
     """Raised inside a call attempt when the worker is stopping."""
@@ -315,7 +321,11 @@ class BatchExecutor:
                     break
 
             while in_flight:
-                done, _ = wait(set(in_flight), return_when=FIRST_COMPLETED)
+                done, _ = wait(
+                    set(in_flight),
+                    timeout=_FUTURES_WAIT_SLICE_SECONDS,
+                    return_when=FIRST_COMPLETED,
+                )
                 for future in done:
                     del in_flight[future]
                     yield future.result()
