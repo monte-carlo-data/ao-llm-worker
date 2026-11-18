@@ -32,6 +32,10 @@ from anthropic import (
     RateLimitError,
 )
 
+# The Vertex client raises these for 503 and 504. They aren't exported from the
+# package root and don't subclass InternalServerError.
+from anthropic._exceptions import DeadlineExceededError, ServiceUnavailableError
+
 from llm_worker.contract import ContractRequest, resolve_model_ref
 from llm_worker.providers.base import (
     ErrorDisposition,
@@ -70,7 +74,16 @@ class AnthropicMessagesProvider(LLMProvider):
         # 429 is a quota rejection and 529 is backend overload: both mean back off.
         if isinstance(exc, (RateLimitError, OverloadedError)):
             return ErrorDisposition.THROTTLED
-        if isinstance(exc, (APIConnectionError, APITimeoutError, InternalServerError)):
+        if isinstance(
+            exc,
+            (
+                APIConnectionError,
+                APITimeoutError,
+                InternalServerError,
+                ServiceUnavailableError,
+                DeadlineExceededError,
+            ),
+        ):
             return ErrorDisposition.RETRY
         if isinstance(exc, (AuthenticationError, PermissionDeniedError)):
             return ErrorDisposition.ABORT_BATCH

@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import anthropic
 import httpx
+from anthropic import _exceptions as anthropic_exceptions
 import pytest
 
 from llm_worker.config import FoundryConfig, VertexConfig
@@ -235,6 +236,22 @@ class TestClassifyError:
         provider = backend.make(mocker.Mock())
         assert (
             provider.classify_error(_status_error(anthropic.InternalServerError, 500))
+            == ErrorDisposition.RETRY
+        )
+
+    # The Vertex client maps 503 and 504 to these classes, which are not
+    # InternalServerError subclasses.
+    @pytest.mark.parametrize(
+        ("cls", "status"),
+        [
+            (anthropic_exceptions.ServiceUnavailableError, 503),
+            (anthropic_exceptions.DeadlineExceededError, 504),
+        ],
+    )
+    def test_vertex_unavailable_and_deadline_retry(self, backend, mocker, cls, status):
+        provider = backend.make(mocker.Mock())
+        assert (
+            provider.classify_error(_status_error(cls, status))
             == ErrorDisposition.RETRY
         )
 
