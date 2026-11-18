@@ -147,6 +147,11 @@ class LLMProvider(ABC):
     def classify_error(self, exc: BaseException) -> ErrorDisposition:
         """Map a backend-native exception to an :class:`ErrorDisposition`."""
 
+    def error_code(self, exc: BaseException) -> str:
+        """A short, content-free name for ``exc``, for logs. Never the message,
+        which may echo request content."""
+        return type(exc).__name__
+
     def _complete_with_temperature_fallback(
         self,
         model: str,

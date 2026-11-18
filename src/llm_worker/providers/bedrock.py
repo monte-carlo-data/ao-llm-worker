@@ -184,6 +184,13 @@ class BedrockProvider(LLMProvider):
             return ErrorDisposition.RETRY
         return ErrorDisposition.FAIL_ROW
 
+    def error_code(self, exc: BaseException) -> str:
+        if isinstance(exc, ClientError):
+            code = _error_code(exc)
+            if code:
+                return code
+        return super().error_code(exc)
+
 
 def _is_temperature_rejection(exc: ClientError) -> bool:
     error = exc.response.get("Error", {})

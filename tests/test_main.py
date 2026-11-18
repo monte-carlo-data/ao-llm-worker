@@ -8,6 +8,7 @@ import pytest
 from clickhouse_connect.driver.exceptions import ClickHouseError
 
 from llm_worker.clickhouse import LLMInput, LLMResult
+from llm_worker.config import BedrockConfig
 from llm_worker.executor import BatchExecutor, Deferred
 from llm_worker.main import (
     WORKER_INFO_REPUBLISH_SECONDS,
@@ -571,8 +572,9 @@ class TestBatchStatusWrite:
         ch.write_batch_status.assert_called_once_with(BATCH_1, "complete", 3, 2, 1)
 
 
-def _service_config(mocker):
+def _service_config(mocker, max_workers=20):
     return mocker.MagicMock(
+        max_workers=max_workers,
         throttle_pause_min_seconds=1.0,
         throttle_pause_max_seconds=60.0,
         throttle_max_row_age_seconds=600,
@@ -580,6 +582,24 @@ def _service_config(mocker):
 
 
 class TestRunStartup:
+    def test_run_sizes_the_bedrock_pool_from_max_workers(self, mocker):
+        mocker.patch(
+            "llm_worker.main.load_config",
+            return_value=_service_config(mocker, max_workers=37),
+        )
+        mocker.patch(
+            "llm_worker.main.load_provider_config",
+            return_value=BedrockConfig(region="us-east-1"),
+        )
+        mocker.patch("llm_worker.main.ClickHouseClient")
+        create_provider = mocker.patch("llm_worker.main.create_provider")
+        mocker.patch("llm_worker.main.BatchExecutor")
+        mocker.patch("llm_worker.main.LLMWorkerService")
+
+        run()
+
+        assert create_provider.call_args.args[0].max_pool_connections == 37
+
     def test_run_passes_the_provider_capabilities(self, mocker):
         mocker.patch(
             "llm_worker.main.load_config", return_value=_service_config(mocker)

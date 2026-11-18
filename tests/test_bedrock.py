@@ -546,6 +546,20 @@ class TestClassifyError:
         assert provider.classify_error(Exception("boom")) == ErrorDisposition.FAIL_ROW
 
 
+class TestErrorCode:
+    def test_client_error_uses_botocore_code(self, mocker):
+        provider = _provider(mocker.Mock())
+        assert (
+            provider.error_code(_client_error("ThrottlingException"))
+            == "ThrottlingException"
+        )
+
+    def test_transport_error_uses_class_name(self, mocker):
+        provider = _provider(mocker.Mock())
+        exc = EndpointConnectionError(endpoint_url="https://x")
+        assert provider.error_code(exc) == "EndpointConnectionError"
+
+
 _SCHEMA = {
     "type": "object",
     "properties": {"score": {"type": "number"}},

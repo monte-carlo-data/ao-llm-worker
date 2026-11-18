@@ -123,6 +123,37 @@ class TestPerModel:
         assert gate.on_throttle("b", call_started_at=clock.now) == 1.0
 
 
+class TestIsPaused:
+    def test_paused_after_a_throttle(self):
+        gate, clock = _gate()
+        gate.on_throttle("m", call_started_at=clock.now)
+
+        assert gate.is_paused("m") is True
+
+    def test_not_paused_once_the_pause_elapses(self):
+        gate, clock = _gate()
+        gate.on_throttle("m", call_started_at=clock.now)
+        clock.advance(1.0)
+
+        assert gate.is_paused("m") is False
+
+    def test_not_paused_for_an_unknown_model(self):
+        gate, _ = _gate()
+
+        assert gate.is_paused("never-throttled") is False
+
+    def test_pause_on_one_model_does_not_pause_another(self):
+        gate, clock = _gate()
+        gate.on_throttle("a", call_started_at=clock.now)
+
+        assert gate.is_paused("b") is False
+
+
+class TestMaxPause:
+    def test_exposes_the_configured_max(self):
+        assert ThrottleGate(1.0, 8.0).max_pause == 8.0
+
+
 class TestWait:
     def test_returns_immediately_without_a_pause(self):
         gate = ThrottleGate(1.0, 8.0)

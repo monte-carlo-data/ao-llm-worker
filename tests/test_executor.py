@@ -324,9 +324,9 @@ class TestAbort:
         executor = _executor(provider, max_workers=2)
         real_invoke = executor.invoke
 
-        def invoke(input_row, abort_event=None):
+        def invoke(input_row, abort_event=None, **kwargs):
             try:
-                return real_invoke(input_row, abort_event)
+                return real_invoke(input_row, abort_event, **kwargs)
             finally:
                 if input_row.model_id == "abort-me":
                     abort_signalled.set()
@@ -499,6 +499,8 @@ class TestThrottle:
         gate = mocker.Mock(spec=ThrottleGate)
         gate.wait.return_value = True
         gate.now.return_value = 5.0
+        gate.is_paused.return_value = False
+        gate.max_pause = 0.0
 
         _executor(FakeProvider(), throttle_gate=gate).invoke(_make_input())
 
@@ -511,6 +513,8 @@ class TestThrottle:
         gate = mocker.Mock(spec=ThrottleGate)
         gate.wait.return_value = True
         gate.now.return_value = 0.0
+        gate.is_paused.return_value = False
+        gate.max_pause = 0.0
 
         result = _executor(
             FakeProvider(always), retry_max_attempts=3, throttle_gate=gate
@@ -518,6 +522,8 @@ class TestThrottle:
 
         assert result.status == "failed"
         assert gate.wait.call_count == 3
+        # Only throttles are reported to the gate, not other errors.
+        gate.on_throttle.assert_not_called()
 
     def test_abort_wins_over_deferral(self):
         abort_event = threading.Event()
@@ -550,23 +556,46 @@ class TestThrottle:
         assert time.monotonic() - started < 1
 
     def test_stopping_cuts_a_retry_backoff_short(self):
-        def always(*a):
+        stop_event = threading.Event()
+
+        def fail_then_stop(*a):
+            stop_event.set()  # SIGTERM arrives during the first attempt
             raise _Retryable("transient")
 
-        stop_event = threading.Event()
-        stop_event.set()
-
+        provider = FakeProvider(fail_then_stop)
         started = time.monotonic()
         result = _executor(
-            FakeProvider(always),
-            retry_max_attempts=3,
-            retry_max_backoff=30,
-            stop_event=stop_event,
+            provider, retry_max_attempts=3, retry_max_backoff=30, stop_event=stop_event
         ).invoke(_make_input())
 
-        # The backoff returns at once; the next attempt sees the stop and defers.
         assert result == Deferred(BATCH_1, ROW_1, "model-1")
-        assert time.monotonic() - started < 1
+        assert provider.calls == 1
+        assert time.monotonic() - started < 0.5  # first backoff would be 1s
+
+    def test_abort_wins_over_a_deferral_earlier_in_the_page(self):
+        def throttle_then_auth_fail(request):
+            if request.prompt == "first":
+                raise _Throttled("slow down")
+            raise _Auth("bad credentials")
+
+        row_1, row_2 = UUID(int=1), UUID(int=2)
+        inputs = [
+            _make_input(row_id=row_1, prompt="first"),
+            _make_input(row_id=row_2, prompt="second"),
+        ]
+
+        # One worker, so row 1 is deferred before row 2 aborts the batch.
+        outcomes = _executor(
+            FakeProvider(throttle_then_auth_fail), max_workers=1
+        ).process_batch(inputs)
+
+        by_row = {o.row_id: o for o in outcomes}
+        assert len(outcomes) == 2
+        assert not any(isinstance(o, Deferred) for o in outcomes)
+        assert by_row[row_1].status == "failed"
+        assert by_row[row_1].error == "Batch aborted"
+        assert by_row[row_2].status == "failed"
+        assert by_row[row_2].error == "bad credentials"
 
     def test_batch_yields_each_row_once_with_deferrals(self):
         def throttle_odd_rows(request):
@@ -594,7 +623,7 @@ class TestThrottleRowAge:
     def _always_throttled(*a):
         raise _Throttled("slow down")
 
-    def test_row_just_under_the_limit_is_deferred(self):
+    def test_row_well_under_the_limit_is_deferred(self):
         executor = BatchExecutor(
             FakeProvider(self._always_throttled),
             1,
@@ -604,7 +633,7 @@ class TestThrottleRowAge:
             max_row_age_seconds=600,
         )
 
-        result = executor.invoke(_make_input(age_seconds=599))
+        result = executor.invoke(_make_input(age_seconds=500))
 
         assert result == Deferred(BATCH_1, ROW_1, "model-1")
 
@@ -639,3 +668,89 @@ class TestThrottleRowAge:
         result = executor.invoke(_make_input(age_seconds=10_000))
 
         assert result.error == "bad request"
+
+
+class _FakeClock:
+    def __init__(self, now=1000.0):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
+class TestThrottleRowAgeIsCurrent:
+    @staticmethod
+    def _always_throttled(*a):
+        raise _Throttled("slow down")
+
+    def test_row_that_ages_past_the_limit_while_in_flight_fails(self):
+        clock = _FakeClock()
+        gate = ThrottleGate(1.0, 1.0, clock=clock)
+
+        def advance_then_throttle(request):
+            clock.advance(20)
+            raise _Throttled("slow down")
+
+        executor = BatchExecutor(
+            FakeProvider(advance_then_throttle),
+            1,
+            1,
+            0,
+            throttle_gate=gate,
+            max_row_age_seconds=600,
+        )
+
+        result = executor.invoke(_make_input(age_seconds=590))
+
+        assert result.status == "failed"
+        assert result.error == "throttled and older than 600 seconds"
+
+    def test_row_near_the_limit_fails_instead_of_deferring(self):
+        executor = BatchExecutor(
+            FakeProvider(self._always_throttled),
+            1,
+            1,
+            0,
+            throttle_gate=ThrottleGate(60.0, 60.0),
+            max_row_age_seconds=600,
+        )
+
+        result = executor.invoke(_make_input(age_seconds=550))
+
+        assert result.status == "failed"
+        assert result.error == "throttled and older than 600 seconds"
+
+    def test_old_row_does_not_wait_out_a_pause(self):
+        gate = ThrottleGate(2.0, 2.0)
+        gate.on_throttle("model-1", call_started_at=gate.now())
+        provider = FakeProvider()
+        executor = BatchExecutor(
+            provider, 1, 1, 0, throttle_gate=gate, max_row_age_seconds=600
+        )
+
+        started = time.monotonic()
+        result = executor.invoke(_make_input(age_seconds=700))
+        elapsed = time.monotonic() - started
+
+        assert result.status == "failed"
+        assert provider.calls == 0
+        assert elapsed < 1
+
+    def test_old_row_still_gets_a_call_when_the_model_is_not_paused(self):
+        provider = FakeProvider()
+        executor = BatchExecutor(
+            provider,
+            1,
+            1,
+            0,
+            throttle_gate=ThrottleGate(2.0, 2.0),
+            max_row_age_seconds=600,
+        )
+
+        result = executor.invoke(_make_input(age_seconds=10_000))
+
+        assert result.status == "complete"
+        assert provider.calls == 1

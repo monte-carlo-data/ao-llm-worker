@@ -91,10 +91,16 @@ A throttled call doesn't fail its row. Throttles are Bedrock's
 - **The turn ends.** After a page with deferred rows, the worker moves on to the
   next batch instead of fetching the same rows again. When every batch in a
   pass deferred rows, it waits `POLL_INTERVAL` before polling again.
-- **Old rows fail.** A throttled row older than `THROTTLE_MAX_ROW_AGE_SECONDS`
-  fails with `throttled and older than N seconds`, so a batch can't stay
-  pending indefinitely. ClickHouse measures the age from the row's `created_at`.
-  Keep the limit below how long the reader of a batch waits for it to complete.
+- **Old rows fail.** A throttled row fails with `throttled and older than N
+  seconds` once its age plus `THROTTLE_PAUSE_MAX_SECONDS` reaches
+  `THROTTLE_MAX_ROW_AGE_SECONDS`, because its next attempt can't come sooner.
+  This keeps a batch from staying pending indefinitely. ClickHouse measures the
+  age from the row's `created_at`, and the worker adds the time since it
+  fetched the row. A row already past the limit fails rather than waiting out a
+  pause. Set the limit so that it, plus the time a full pass over pending
+  batches can take, stays below how long the reader of a batch waits for it to
+  complete. With many batches throttled on the same model, a pass can take
+  several pauses.
 
 Other transient errors, such as 5xx responses (including Vertex 503 and 504),
 timeouts and connection errors, are retried up to `RETRY_MAX_ATTEMPTS` and then
@@ -188,7 +194,7 @@ Model selection is per-request via each input row's `model_id`, not env-configur
 | `BATCH_PAGE_SIZE`     | `100`   | Input rows fetched per page within a batch     |
 | `THROTTLE_PAUSE_MIN_SECONDS` | `1` | First pause for a throttled model, in seconds |
 | `THROTTLE_PAUSE_MAX_SECONDS` | `60` | Longest pause for a throttled model, in seconds |
-| `THROTTLE_MAX_ROW_AGE_SECONDS` | `600` | Age after which a throttled row fails instead of being deferred |
+| `THROTTLE_MAX_ROW_AGE_SECONDS` | `600` | Age (seconds since insert) at which a throttled row fails instead of being deferred; see [Throttling](#throttling) |
 
 ## Testing
 
@@ -231,7 +237,8 @@ regeneration workflow.
 src/llm_worker/
   config.py       -- environment-based configuration + provider selection
   main.py         -- polling loop, batch orchestration, graceful shutdown
-  executor.py     -- provider-agnostic thread pool, retry, and result mapping
+  executor.py     -- provider-agnostic thread pool, retry, throttle deferral, and result mapping
+  throttle.py     -- per-model pause shared by worker threads when a backend throttles
   contract.py     -- MC eval contract v1 types + input normalization
   providers/      -- pluggable LLM backends (bedrock, vertex, foundry)
   clickhouse.py   -- ClickHouse reads/writes for inputs, results, and batch status

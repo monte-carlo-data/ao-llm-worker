@@ -8,6 +8,11 @@ from llm_worker.contract import resolve_model_ref
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_MAX_WORKERS = 20
+DEFAULT_THROTTLE_PAUSE_MIN_SECONDS = 1.0
+DEFAULT_THROTTLE_PAUSE_MAX_SECONDS = 60.0
+DEFAULT_THROTTLE_MAX_ROW_AGE_SECONDS = 600
+
 
 @dataclass(frozen=True)
 class ClickHouseConfig:
@@ -34,9 +39,10 @@ class BedrockConfig:
     # because inference profiles are AWS's own per-call cost-attribution handle;
     # Vertex/Foundry attribute spend by GCP project / Azure resource instead.
     inference_profiles: dict[str, str] = field(default_factory=dict)
-    # Size of the shared boto client's connection pool. Matches MAX_WORKERS so
-    # every worker thread can hold a connection; botocore's default is 10.
-    max_pool_connections: int = 20
+    # Size of the shared boto client's connection pool. Set by main.run from
+    # MAX_WORKERS so every worker thread can hold a connection; botocore's
+    # default is 10.
+    max_pool_connections: int = DEFAULT_MAX_WORKERS
 
 
 @dataclass(frozen=True)
@@ -74,12 +80,10 @@ class ServiceConfig:
     poll_interval: float
     pending_batch_limit: int
     batch_page_size: int
-    # A throttled model pauses for a delay that starts at the minimum and doubles
-    # with each new pause, up to the maximum.
+    # See llm_worker.throttle for how the pause grows.
     throttle_pause_min_seconds: float
     throttle_pause_max_seconds: float
-    # A throttled row is deferred until it is this old (seconds since it was
-    # inserted), then failed.
+    # See BatchExecutor for how the row-age limit applies.
     throttle_max_row_age_seconds: int
 
 
@@ -150,8 +154,6 @@ def load_bedrock_config() -> BedrockConfig:
     return BedrockConfig(
         region=os.environ.get("AWS_REGION", "us-east-1"),
         inference_profiles=inference_profiles,
-        # Same env var and default as ServiceConfig.max_workers.
-        max_pool_connections=_parse_env_int("MAX_WORKERS", "20"),
     )
 
 
@@ -175,8 +177,12 @@ def load_config() -> ServiceConfig:
     # Provider-agnostic: config is a leaf module. The composition root (main.run)
     # resolves the provider config and adapter via the providers registry, keeping
     # the dependency one-directional (providers -> config).
-    pause_min = _parse_env_float("THROTTLE_PAUSE_MIN_SECONDS", "1")
-    pause_max = _parse_env_float("THROTTLE_PAUSE_MAX_SECONDS", "60")
+    pause_min = _parse_env_float(
+        "THROTTLE_PAUSE_MIN_SECONDS", str(DEFAULT_THROTTLE_PAUSE_MIN_SECONDS)
+    )
+    pause_max = _parse_env_float(
+        "THROTTLE_PAUSE_MAX_SECONDS", str(DEFAULT_THROTTLE_PAUSE_MAX_SECONDS)
+    )
     if pause_max < pause_min:
         raise ValueError(
             f"THROTTLE_PAUSE_MAX_SECONDS={pause_max} must be >= "
@@ -191,7 +197,7 @@ def load_config() -> ServiceConfig:
             database=os.environ.get("CH_DATABASE", "default"),
             ca_cert=os.environ.get("CH_CA_CERT", ""),
         ),
-        max_workers=_parse_env_int("MAX_WORKERS", "20"),
+        max_workers=_parse_env_int("MAX_WORKERS", str(DEFAULT_MAX_WORKERS)),
         retry_max_attempts=_parse_env_int("RETRY_MAX_ATTEMPTS", "5"),
         retry_max_backoff=_parse_env_int("RETRY_MAX_BACKOFF", "30"),
         poll_interval=_parse_env_float("POLL_INTERVAL", "10"),
@@ -200,6 +206,6 @@ def load_config() -> ServiceConfig:
         throttle_pause_min_seconds=pause_min,
         throttle_pause_max_seconds=pause_max,
         throttle_max_row_age_seconds=_parse_env_int(
-            "THROTTLE_MAX_ROW_AGE_SECONDS", "600"
+            "THROTTLE_MAX_ROW_AGE_SECONDS", str(DEFAULT_THROTTLE_MAX_ROW_AGE_SECONDS)
         ),
     )

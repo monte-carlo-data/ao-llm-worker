@@ -217,6 +217,13 @@ class TestTemperatureFallback:
         assert client.messages.create.call_count == 1
 
 
+class TestErrorCode:
+    def test_uses_exception_class_name(self, backend, mocker):
+        provider = backend.make(mocker.Mock())
+        exc = _status_error(anthropic.RateLimitError, 429)
+        assert provider.error_code(exc) == "RateLimitError"
+
+
 class TestClassifyError:
     def test_rate_limit_is_throttled(self, backend, mocker):
         provider = backend.make(mocker.Mock())

@@ -6,7 +6,7 @@ import signal
 import threading
 import time
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import FrameType
 from uuid import UUID
 
@@ -19,7 +19,7 @@ from tenacity import (
 )
 
 from llm_worker.clickhouse import ClickHouseClient, LLMResult
-from llm_worker.config import load_config
+from llm_worker.config import BedrockConfig, load_config
 from llm_worker.executor import BatchExecutor, Deferred, RowOutcome
 from llm_worker.providers import create_provider, load_provider_config
 from llm_worker.logging_setup import configure_logging
@@ -43,8 +43,8 @@ WORKER_INFO_RETRY_SECONDS = 30
 class BatchTurn:
     """What one turn on a batch did, for the caller's scheduling.
 
-    ``deferred_rows`` counts rows left without a result because the backend
-    throttled them; the batch stays pending and a later turn retries them.
+    ``deferred_rows`` counts rows left without a result (throttled, or the
+    worker stopped); the batch stays pending and a later turn retries them.
     """
 
     deferred_rows: int = 0
@@ -305,6 +305,11 @@ class LLMWorkerService:
 def run():
     config = load_config()
     provider_config = load_provider_config(os.environ.get("LLM_PROVIDER", "bedrock"))
+    if isinstance(provider_config, BedrockConfig):
+        # The connection pool matches the worker thread count.
+        provider_config = replace(
+            provider_config, max_pool_connections=config.max_workers
+        )
     ch = ClickHouseClient(
         config.clickhouse,
         pending_batch_limit=config.pending_batch_limit,

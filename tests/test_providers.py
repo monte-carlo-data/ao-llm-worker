@@ -11,7 +11,6 @@ from llm_worker.providers.bedrock import BedrockProvider
 def test_load_provider_config_default_bedrock(monkeypatch):
     monkeypatch.delenv("AWS_REGION", raising=False)
     monkeypatch.delenv("BEDROCK_INFERENCE_PROFILES", raising=False)
-    monkeypatch.delenv("MAX_WORKERS", raising=False)
     cfg = load_provider_config("bedrock")
     assert isinstance(cfg, BedrockConfig)
     assert cfg.provider == "bedrock"
@@ -19,11 +18,6 @@ def test_load_provider_config_default_bedrock(monkeypatch):
     assert cfg.region == "us-east-1"
     assert cfg.inference_profiles == {}
     assert cfg.max_pool_connections == 20
-
-
-def test_bedrock_pool_size_follows_max_workers(monkeypatch):
-    monkeypatch.setenv("MAX_WORKERS", "50")
-    assert load_provider_config("bedrock").max_pool_connections == 50
 
 
 def test_bedrock_region_from_env(monkeypatch):
