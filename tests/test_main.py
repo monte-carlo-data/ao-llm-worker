@@ -315,6 +315,77 @@ class TestDeferredRows:
         assert service.process_single_batch(BATCH_1) == BatchTurn(deferred_rows=0)
 
 
+class TestIdleWait:
+    def _service(self, mocker, ch, turns):
+        stop_event = threading.Event()
+        calls = []
+
+        def record_wait(timeout):
+            calls.append(("wait", timeout))
+            return False
+
+        mocker.patch.object(stop_event, "wait", side_effect=record_wait)
+        service = LLMWorkerService(
+            ch, MagicMock(), 7, worker_info=WORKER_INFO, stop_event=stop_event
+        )
+        mocker.patch.object(service, "process_single_batch", side_effect=turns)
+        return service, calls
+
+    def test_waits_when_every_batch_in_a_pass_deferred(self, mocker):
+        ch = MagicMock()
+        service, calls = self._service(
+            mocker, ch, [BatchTurn(deferred_rows=1), BatchTurn(deferred_rows=4)]
+        )
+
+        def poll():
+            calls.append(("poll",))
+            if len([c for c in calls if c[0] == "poll"]) > 1:
+                service.stop()
+                return []
+            return [BATCH_1, BATCH_2]
+
+        ch.get_pending_batches.side_effect = poll
+
+        service.run()
+
+        assert calls[:3] == [("poll",), ("wait", 7), ("poll",)]
+
+    def test_does_not_wait_when_some_batch_progressed(self, mocker):
+        ch = MagicMock()
+        service, calls = self._service(
+            mocker, ch, [BatchTurn(deferred_rows=1), BatchTurn(deferred_rows=0)]
+        )
+
+        def poll():
+            calls.append(("poll",))
+            if len([c for c in calls if c[0] == "poll"]) > 1:
+                service.stop()
+                return []
+            return [BATCH_1, BATCH_2]
+
+        ch.get_pending_batches.side_effect = poll
+
+        service.run()
+
+        assert calls[:2] == [("poll",), ("poll",)]
+
+    def test_stop_ends_an_idle_wait_promptly(self, mocker):
+        ch = MagicMock()
+        polled = threading.Event()
+        ch.get_pending_batches.side_effect = lambda: polled.set() or []
+        service = _make_service(ch_mock=ch, poll_interval=30)
+        # Signal handlers can only be installed from the main thread.
+        mocker.patch.object(service, "_install_signal_handlers")
+        worker = threading.Thread(target=service.run)
+
+        worker.start()
+        assert polled.wait(timeout=1)
+        service.stop()
+        worker.join(timeout=1)
+
+        assert not worker.is_alive()
+
+
 class TestStopBetweenPages:
     def test_stop_ends_the_turn_before_the_next_page(self):
         ch = MagicMock()
@@ -620,7 +691,6 @@ class TestWorkerInfoPublishing:
         ch = MagicMock()
         ch.write_worker_info.side_effect = RuntimeError("boom")
         service, _ = self._service(mocker, ch)
-        mocker.patch("llm_worker.main.time.sleep")
 
         def stop_after_first_poll():
             service.stop()

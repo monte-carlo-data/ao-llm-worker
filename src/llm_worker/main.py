@@ -89,20 +89,26 @@ class LLMWorkerService:
         while not self._should_stop:
             self._maybe_publish_worker_info()
             try:
-                batch_ids = self._ch.get_pending_batches()
-                if batch_ids:
-                    for batch_id in batch_ids:
-                        if self._should_stop:
-                            break
-                        self.process_single_batch(batch_id)
-                else:
-                    time.sleep(self._poll_interval)
+                progressed = False
+                for batch_id in self._ch.get_pending_batches():
+                    if self._should_stop:
+                        break
+                    if self.process_single_batch(batch_id).deferred_rows == 0:
+                        progressed = True
+                # Wait when there was nothing to do, or when every batch only
+                # deferred rows: polling again at once would refetch rows the
+                # backend is still throttling.
+                if not progressed:
+                    self._idle_wait()
             except ClickHouseError as exc:
                 logger.error("polling_error", extra={"error": str(exc)})
-                if not self._should_stop:
-                    time.sleep(self._poll_interval)
+                self._idle_wait()
 
         logger.info("worker_stopped")
+
+    def _idle_wait(self) -> None:
+        """Wait one poll interval, returning early if the worker is stopping."""
+        self._stop_event.wait(self._poll_interval)
 
     def _maybe_publish_worker_info(self) -> None:
         """Publish the worker info at startup, then every WORKER_INFO_REPUBLISH_SECONDS.
