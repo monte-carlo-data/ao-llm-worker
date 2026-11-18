@@ -18,8 +18,11 @@ def _make_input(
     prompt="hello",
     params="{}",
     tool_config="",
+    age_seconds=0,
 ):
-    return LLMInput(batch_id, row_id, model_id, prompt, params, tool_config)
+    return LLMInput(
+        batch_id, row_id, model_id, prompt, params, tool_config, age_seconds
+    )
 
 
 class _Retryable(Exception):
