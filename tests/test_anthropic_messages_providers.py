@@ -217,11 +217,18 @@ class TestTemperatureFallback:
 
 
 class TestClassifyError:
-    def test_rate_limit_retries(self, backend, mocker):
+    def test_rate_limit_is_throttled(self, backend, mocker):
         provider = backend.make(mocker.Mock())
         assert (
             provider.classify_error(_status_error(anthropic.RateLimitError, 429))
-            == ErrorDisposition.RETRY
+            == ErrorDisposition.THROTTLED
+        )
+
+    def test_overloaded_is_throttled(self, backend, mocker):
+        provider = backend.make(mocker.Mock())
+        assert (
+            provider.classify_error(_status_error(anthropic.OverloadedError, 529))
+            == ErrorDisposition.THROTTLED
         )
 
     def test_internal_server_retries(self, backend, mocker):

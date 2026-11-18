@@ -27,6 +27,7 @@ from anthropic import (
     AuthenticationError,
     BadRequestError,
     InternalServerError,
+    OverloadedError,
     PermissionDeniedError,
     RateLimitError,
 )
@@ -66,10 +67,10 @@ class AnthropicMessagesProvider(LLMProvider):
         return _to_llm_response(response, request)
 
     def classify_error(self, exc: BaseException) -> ErrorDisposition:
-        if isinstance(
-            exc,
-            (RateLimitError, APIConnectionError, APITimeoutError, InternalServerError),
-        ):
+        # 429 is a quota rejection and 529 is backend overload: both mean back off.
+        if isinstance(exc, (RateLimitError, OverloadedError)):
+            return ErrorDisposition.THROTTLED
+        if isinstance(exc, (APIConnectionError, APITimeoutError, InternalServerError)):
             return ErrorDisposition.RETRY
         if isinstance(exc, (AuthenticationError, PermissionDeniedError)):
             return ErrorDisposition.ABORT_BATCH
