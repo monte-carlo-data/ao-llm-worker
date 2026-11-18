@@ -1,11 +1,14 @@
+import time
 from uuid import UUID
 
 import pytest
+from botocore.exceptions import ClientError
 
 from llm_worker.config import BedrockConfig
 from llm_worker.executor import BatchExecutor
-from llm_worker.main import LLMWorkerService, WorkerInfo
+from llm_worker.main import BatchTurn, LLMWorkerService, WorkerInfo
 from llm_worker.providers.bedrock import BedrockProvider
+from llm_worker.throttle import ThrottleGate
 
 pytestmark = [pytest.mark.clickhouse]
 
@@ -34,6 +37,24 @@ def _insert_input(ch_client, batch_id, row_id, prompt="test prompt"):
             "params",
             "tool_config",
         ],
+    )
+
+
+def _insert_aged_input(ch_client, batch_id, row_id, minutes_old):
+    # created_at comes from ClickHouse's own clock, as it does in production.
+    ch_client._client.command(
+        """INSERT INTO llm_inputs
+            (batch_id, row_id, model_id, prompt, params, tool_config, created_at)
+        SELECT {batch_id:UUID}, {row_id:UUID}, 'test-model', 'old prompt', '{}', '',
+            now() - toIntervalMinute({minutes:UInt32})""",
+        parameters={"batch_id": batch_id, "row_id": row_id, "minutes": minutes_old},
+    )
+
+
+def _throttling_error():
+    return ClientError(
+        {"Error": {"Code": "ThrottlingException", "Message": "slow down"}},
+        "Converse",
     )
 
 
@@ -68,13 +89,16 @@ def _get_batch_status(ch_client, batch_id):
     return rows[0] if rows else None
 
 
-def _make_service(ch_client, mock_boto):
+def _make_service(ch_client, mock_boto, max_row_age_seconds=600):
     provider = BedrockProvider(BEDROCK_CONFIG, boto_client=mock_boto)
     executor = BatchExecutor(
         provider,
         max_workers=2,
         retry_max_attempts=1,
         retry_max_backoff=0,
+        # Short pauses so throttled tests don't wait out the default.
+        throttle_gate=ThrottleGate(0.01, 0.01),
+        max_row_age_seconds=max_row_age_seconds,
     )
     return LLMWorkerService(
         ch_client,
@@ -242,3 +266,49 @@ class TestProcessSingleBatch:
         assert batch_status[1] == 5  # total_rows
         assert batch_status[2] == 5  # completed_rows
         assert batch_status[3] == 0  # failed_rows
+
+
+class TestThrottledBatches:
+    def test_throttled_batch_stays_pending_then_completes(self, ch_client, mocker):
+        _insert_input(ch_client, BATCH_1, ROW_1, "hello")
+        _insert_input(ch_client, BATCH_1, ROW_2, "world")
+        ch_client.write_batch_status(BATCH_1, "pending", total_rows=2)
+        throttled = True
+
+        def converse(**kwargs):
+            if throttled:
+                raise _throttling_error()
+            return _text_response("done")
+
+        mock_boto = mocker.Mock()
+        mock_boto.converse.side_effect = converse
+        service = _make_service(ch_client, mock_boto)
+
+        # Throttled: nothing is written and the batch is still pending.
+        assert service.process_single_batch(BATCH_1) == BatchTurn(deferred_rows=2)
+        assert _get_results(ch_client, BATCH_1) == []
+        assert BATCH_1 in ch_client.get_pending_batches()
+
+        # The backend recovers: the next turn completes every row.
+        throttled = False
+        time.sleep(0.05)  # past the short pause
+        assert service.process_single_batch(BATCH_1) == BatchTurn(deferred_rows=0)
+
+        results = _get_results(ch_client, BATCH_1)
+        assert [r[3] for r in results] == ["complete", "complete"]
+        assert _get_batch_status(ch_client, BATCH_1) == ("complete", 2, 2, 0)
+        assert BATCH_1 not in ch_client.get_pending_batches()
+
+    def test_throttled_row_past_the_age_limit_fails(self, ch_client, mocker):
+        _insert_aged_input(ch_client, BATCH_1, ROW_1, minutes_old=20)
+        mock_boto = mocker.Mock()
+        mock_boto.converse.side_effect = _throttling_error()
+        service = _make_service(ch_client, mock_boto, max_row_age_seconds=600)
+
+        assert service.process_single_batch(BATCH_1) == BatchTurn(deferred_rows=0)
+
+        results = _get_results(ch_client, BATCH_1)
+        assert len(results) == 1
+        assert results[0][3] == "failed"
+        assert results[0][4] == "throttled and older than 600 seconds"
+        assert _get_batch_status(ch_client, BATCH_1) == ("complete", 1, 0, 1)
