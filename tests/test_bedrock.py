@@ -708,6 +708,15 @@ def test_client_waits_120_seconds_and_keeps_botocore_retries(mocker):
     assert config.retries is None
 
 
+def test_client_pool_matches_max_pool_connections(mocker):
+    boto_client = mocker.patch("llm_worker.providers.bedrock.boto3.client")
+
+    BedrockProvider(BedrockConfig(region="us-east-1", max_pool_connections=37))
+
+    config = boto_client.call_args.kwargs["config"]
+    assert config.max_pool_connections == 37
+
+
 def test_publishes_all_request_profile_capabilities():
     assert BedrockProvider.capabilities == ("output_format", "thinking", "effort")
 
