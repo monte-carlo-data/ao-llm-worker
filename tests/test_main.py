@@ -16,6 +16,7 @@ from llm_worker.main import (
     WorkerInfo,
     run,
 )
+from llm_worker.throttle import ThrottleGate
 
 BATCH_1 = UUID("00000000-0000-0000-0000-000000000001")
 BATCH_2 = UUID("00000000-0000-0000-0000-000000000002")
@@ -456,9 +457,17 @@ class TestBatchStatusWrite:
         ch.write_batch_status.assert_called_once_with(BATCH_1, "complete", 3, 2, 1)
 
 
+def _service_config(mocker):
+    return mocker.MagicMock(
+        throttle_pause_min_seconds=1.0, throttle_pause_max_seconds=60.0
+    )
+
+
 class TestRunStartup:
     def test_run_passes_the_provider_capabilities(self, mocker):
-        mocker.patch("llm_worker.main.load_config", return_value=mocker.MagicMock())
+        mocker.patch(
+            "llm_worker.main.load_config", return_value=_service_config(mocker)
+        )
         provider_config = mocker.MagicMock(cloud="aws", provider="bedrock")
         mocker.patch(
             "llm_worker.main.load_provider_config", return_value=provider_config
@@ -476,6 +485,28 @@ class TestRunStartup:
             "aws", "bedrock", ("output_format", "thinking")
         )
         mock_service_cls.return_value.run.assert_called_once()
+
+    def test_run_shares_one_stop_event_and_a_throttle_gate(self, mocker):
+        mocker.patch(
+            "llm_worker.main.load_config", return_value=_service_config(mocker)
+        )
+        mocker.patch(
+            "llm_worker.main.load_provider_config",
+            return_value=mocker.MagicMock(cloud="aws", provider="bedrock"),
+        )
+        mocker.patch("llm_worker.main.ClickHouseClient")
+        mocker.patch("llm_worker.main.create_provider")
+        executor_cls = mocker.patch("llm_worker.main.BatchExecutor")
+        service_cls = mocker.patch("llm_worker.main.LLMWorkerService")
+
+        run()
+
+        executor_kwargs = executor_cls.call_args.kwargs
+        assert isinstance(executor_kwargs["throttle_gate"], ThrottleGate)
+        assert isinstance(executor_kwargs["stop_event"], threading.Event)
+        assert (
+            executor_kwargs["stop_event"] is service_cls.call_args.kwargs["stop_event"]
+        )
 
 
 class TestWorkerInfoPublishing:

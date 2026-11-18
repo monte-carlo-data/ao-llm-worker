@@ -24,8 +24,28 @@ from tenacity import (
 from llm_worker.clickhouse import LLMInput, LLMResult
 from llm_worker.contract import ContractRequest, build_request
 from llm_worker.providers.base import ErrorDisposition, LLMProvider
+from llm_worker.throttle import ThrottleGate
 
 logger = logging.getLogger(__name__)
+
+# Used when no gate is injected; main.run() passes one built from settings.
+DEFAULT_THROTTLE_PAUSE_MIN_SECONDS = 1.0
+DEFAULT_THROTTLE_PAUSE_MAX_SECONDS = 60.0
+
+
+class _Stopped(Exception):
+    """Raised inside a call attempt when the worker is stopping."""
+
+
+def _error_code(exc: BaseException) -> str:
+    """A short, content-free name for an error, for logs: the botocore error
+    code when there is one, otherwise the exception class name."""
+    response = getattr(exc, "response", None)
+    if isinstance(response, dict):
+        code = response.get("Error", {}).get("Code")
+        if code:
+            return str(code)
+    return type(exc).__name__
 
 
 @dataclass(frozen=True)
@@ -49,22 +69,64 @@ class BatchExecutor:
         max_workers: int,
         retry_max_attempts: int,
         retry_max_backoff: int,
+        *,
+        throttle_gate: ThrottleGate | None = None,
+        stop_event: threading.Event | None = None,
     ):
         self._provider = provider
         self._max_workers = max_workers
         self._retry_max_attempts = retry_max_attempts
         self._retry_max_backoff = retry_max_backoff
+        self._gate = throttle_gate or ThrottleGate(
+            DEFAULT_THROTTLE_PAUSE_MIN_SECONDS, DEFAULT_THROTTLE_PAUSE_MAX_SECONDS
+        )
+        # Set when the worker is stopping; wakes threads waiting out a pause or a
+        # retry backoff.
+        self._stop_event = stop_event or threading.Event()
+
+    def _interruptible_sleep(self, seconds: float) -> None:
+        self._stop_event.wait(seconds)
+
+    def _call_through_gate(self, request: ContractRequest):
+        """One call attempt: wait out the model's pause, call the provider, and
+        report the outcome to the gate."""
+        model_id = request.model_id
+        # A stopping worker starts no new calls; the row is left for the next one.
+        if self._stop_event.is_set() or not self._gate.wait(model_id, self._stop_event):
+            raise _Stopped()
+        started_at = self._gate.now()
+        try:
+            response = self._provider.complete(request)
+        except Exception as exc:
+            if self._provider.classify_error(exc) == ErrorDisposition.THROTTLED:
+                pause = self._gate.on_throttle(model_id, started_at)
+                if pause is not None:
+                    logger.warning(
+                        "llm_throttle_pause",
+                        extra={
+                            "model_id": model_id,
+                            "pause_seconds": pause,
+                            "error_code": _error_code(exc),
+                        },
+                    )
+            raise
+        self._gate.on_success(model_id, started_at)
+        return response
 
     def _complete_with_retry(self, request: ContractRequest):
         retrying = Retrying(
+            # Throttles are not retried here: they defer the row instead, so they
+            # never use up its retry budget.
             retry=retry_if_exception(
                 lambda exc: (
-                    self._provider.classify_error(exc)
-                    in (ErrorDisposition.RETRY, ErrorDisposition.THROTTLED)
+                    not isinstance(exc, _Stopped)
+                    and self._provider.classify_error(exc) == ErrorDisposition.RETRY
                 )
             ),
             stop=stop_after_attempt(self._retry_max_attempts),
             wait=wait_exponential(multiplier=1, max=self._retry_max_backoff),
+            # Interruptible, so a stopping worker doesn't sit out a backoff.
+            sleep=self._interruptible_sleep,
             reraise=True,
             before_sleep=lambda state: logger.warning(
                 "llm_retry",
@@ -79,8 +141,22 @@ class BatchExecutor:
         )
         for attempt in retrying:
             with attempt:
-                return self._provider.complete(request)
+                return self._call_through_gate(request)
         raise RuntimeError("Retrying exhausted without result")
+
+    @staticmethod
+    def _deferred(input_row: LLMInput, reason: str) -> Deferred:
+        logger.info(
+            "row_deferred",
+            extra={
+                "row_id": str(input_row.row_id),
+                "batch_id": str(input_row.batch_id),
+                "model_id": input_row.model_id,
+                "reason": reason,
+                "age_seconds": input_row.age_seconds,
+            },
+        )
+        return Deferred(input_row.batch_id, input_row.row_id, input_row.model_id)
 
     @staticmethod
     def _aborted_result(input_row: LLMInput) -> LLMResult:
@@ -96,7 +172,7 @@ class BatchExecutor:
         self,
         input_row: LLMInput,
         abort_event: threading.Event | None = None,
-    ) -> LLMResult:
+    ) -> RowOutcome:
         if abort_event and abort_event.is_set():
             logger.info(
                 "row_skipped_abort",
@@ -159,8 +235,17 @@ class BatchExecutor:
                 status="complete",
                 error="",
             )
+        except _Stopped:
+            # The worker is stopping while this row waited on a pause. Leave it
+            # for the next worker rather than failing it.
+            return self._deferred(input_row, reason="stopping")
         except Exception as e:
             disposition = self._provider.classify_error(e)
+            if disposition == ErrorDisposition.THROTTLED:
+                # An aborted batch completes this turn, so the abort wins.
+                if abort_event and abort_event.is_set():
+                    return self._aborted_result(input_row)
+                return self._deferred(input_row, reason=_error_code(e))
             if disposition == ErrorDisposition.ABORT_BATCH and abort_event:
                 logger.error(
                     "batch_aborted",
@@ -193,7 +278,7 @@ class BatchExecutor:
             # Map each in-flight future to its input row so a future cancelled during
             # an abort can still be emitted as an aborted result rather than silently
             # dropped — every row must be yielded exactly once.
-            in_flight: dict[Future[LLMResult], LLMInput] = {}
+            in_flight: dict[Future[RowOutcome], LLMInput] = {}
 
             def submit(row: LLMInput) -> None:
                 in_flight[executor.submit(self.invoke, row, abort_event)] = row

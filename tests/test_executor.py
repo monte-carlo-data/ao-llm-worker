@@ -3,9 +3,14 @@ import threading
 import time
 from uuid import UUID
 
+from botocore.exceptions import ClientError
+
 from llm_worker.clickhouse import LLMInput
-from llm_worker.executor import BatchExecutor
+from llm_worker.config import BedrockConfig
+from llm_worker.executor import BatchExecutor, Deferred
 from llm_worker.providers.base import ErrorDisposition, LLMProvider, LLMResponse
+from llm_worker.providers.bedrock import BedrockProvider
+from llm_worker.throttle import ThrottleGate
 
 BATCH_1 = UUID("00000000-0000-0000-0000-000000000001")
 ROW_1 = UUID("00000000-0000-0000-0000-000000000011")
@@ -67,8 +72,23 @@ class FakeProvider(LLMProvider):
         return _DISPOSITIONS.get(type(exc), ErrorDisposition.FAIL_ROW)
 
 
-def _executor(provider, max_workers=3, retry_max_attempts=1, retry_max_backoff=0):
-    return BatchExecutor(provider, max_workers, retry_max_attempts, retry_max_backoff)
+def _executor(
+    provider,
+    max_workers=3,
+    retry_max_attempts=1,
+    retry_max_backoff=0,
+    throttle_gate=None,
+    stop_event=None,
+):
+    return BatchExecutor(
+        provider,
+        max_workers,
+        retry_max_attempts,
+        retry_max_backoff,
+        # Short pauses so throttled tests don't sit out the production default.
+        throttle_gate=throttle_gate or ThrottleGate(0.01, 0.01),
+        stop_event=stop_event,
+    )
 
 
 class TestInvoke:
@@ -180,20 +200,28 @@ class TestRetry:
         assert result.status == "failed"
         assert provider.calls == 3
 
-    def test_throttled_is_retried_like_retry(self):
-        calls = {"n": 0}
+    def test_throttled_row_is_deferred_without_using_retries(self):
+        def always(*a):
+            raise _Throttled("slow down")
 
-        def throttled_twice(*a):
-            calls["n"] += 1
-            if calls["n"] < 3:
-                raise _Throttled("slow down")
-            return LLMResponse({"output_text": "done"}, 0, 0)
-
-        provider = FakeProvider(throttled_twice)
+        provider = FakeProvider(always)
         result = _executor(provider, retry_max_attempts=5).invoke(_make_input())
 
-        assert result.status == "complete"
-        assert provider.calls == 3
+        assert result == Deferred(BATCH_1, ROW_1, "model-1")
+        assert provider.calls == 1
+
+    def test_bedrock_throttling_defers_row(self, mocker):
+        boto = mocker.Mock()
+        boto.converse.side_effect = ClientError(
+            {"Error": {"Code": "ThrottlingException", "Message": "slow down"}},
+            "Converse",
+        )
+        provider = BedrockProvider(BedrockConfig(region="us-east-1"), boto_client=boto)
+
+        result = _executor(provider, retry_max_attempts=5).invoke(_make_input())
+
+        assert result == Deferred(BATCH_1, ROW_1, "model-1")
+        assert boto.converse.call_count == 1
 
     def test_no_retry_on_fail_row(self):
         def always(*a):
@@ -453,3 +481,109 @@ class TestInvalidRequestProfileCombinations:
         results = list(_executor(provider).process_batch_iter([bad, _make_input()]))
 
         assert sorted(r.status for r in results) == ["complete", "failed"]
+
+
+class TestThrottle:
+    def test_throttle_starts_a_pause_for_the_model(self):
+        def always(*a):
+            raise _Throttled("slow down")
+
+        gate = ThrottleGate(30.0, 30.0)
+        _executor(FakeProvider(always), throttle_gate=gate).invoke(_make_input())
+
+        # A new throttle now belongs to the running pause.
+        assert gate.on_throttle("model-1", call_started_at=gate.now()) is None
+        assert gate.on_throttle("model-2", call_started_at=gate.now()) == 30.0
+
+    def test_success_is_reported_to_the_gate(self, mocker):
+        gate = mocker.Mock(spec=ThrottleGate)
+        gate.wait.return_value = True
+        gate.now.return_value = 5.0
+
+        _executor(FakeProvider(), throttle_gate=gate).invoke(_make_input())
+
+        gate.on_success.assert_called_once_with("model-1", 5.0)
+
+    def test_every_retry_attempt_waits_on_the_gate(self, mocker):
+        def always(*a):
+            raise _Retryable("transient")
+
+        gate = mocker.Mock(spec=ThrottleGate)
+        gate.wait.return_value = True
+        gate.now.return_value = 0.0
+
+        result = _executor(
+            FakeProvider(always), retry_max_attempts=3, throttle_gate=gate
+        ).invoke(_make_input())
+
+        assert result.status == "failed"
+        assert gate.wait.call_count == 3
+
+    def test_abort_wins_over_deferral(self):
+        abort_event = threading.Event()
+
+        def abort_then_throttle(*a):
+            abort_event.set()  # another row's auth failure aborted the batch
+            raise _Throttled("slow down")
+
+        result = _executor(FakeProvider(abort_then_throttle)).invoke(
+            _make_input(), abort_event=abort_event
+        )
+
+        assert result.status == "failed"
+        assert result.error == "Batch aborted"
+
+    def test_stopping_during_a_pause_defers_without_calling(self):
+        gate = ThrottleGate(30.0, 30.0)
+        gate.on_throttle("model-1", call_started_at=gate.now())
+        stop_event = threading.Event()
+        stop_event.set()
+        provider = FakeProvider()
+
+        started = time.monotonic()
+        result = _executor(provider, throttle_gate=gate, stop_event=stop_event).invoke(
+            _make_input()
+        )
+
+        assert result == Deferred(BATCH_1, ROW_1, "model-1")
+        assert provider.calls == 0
+        assert time.monotonic() - started < 1
+
+    def test_stopping_cuts_a_retry_backoff_short(self):
+        def always(*a):
+            raise _Retryable("transient")
+
+        stop_event = threading.Event()
+        stop_event.set()
+
+        started = time.monotonic()
+        result = _executor(
+            FakeProvider(always),
+            retry_max_attempts=3,
+            retry_max_backoff=30,
+            stop_event=stop_event,
+        ).invoke(_make_input())
+
+        # The backoff returns at once; the next attempt sees the stop and defers.
+        assert result == Deferred(BATCH_1, ROW_1, "model-1")
+        assert time.monotonic() - started < 1
+
+    def test_batch_yields_each_row_once_with_deferrals(self):
+        def throttle_odd_rows(request):
+            if request.prompt.endswith(("1", "3")):
+                raise _Throttled("slow down")
+            return LLMResponse({"output_text": "ok"}, 0, 0)
+
+        inputs = [
+            _make_input(row_id=UUID(int=i), model_id=f"model-{i}", prompt=f"p{i}")
+            for i in range(4)
+        ]
+
+        outcomes = _executor(FakeProvider(throttle_odd_rows)).process_batch(inputs)
+
+        by_row = {o.row_id: o for o in outcomes}
+        assert len(outcomes) == 4
+        assert by_row[UUID(int=1)] == Deferred(BATCH_1, UUID(int=1), "model-1")
+        assert by_row[UUID(int=3)] == Deferred(BATCH_1, UUID(int=3), "model-3")
+        assert by_row[UUID(int=0)].status == "complete"
+        assert by_row[UUID(int=2)].status == "complete"

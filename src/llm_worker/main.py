@@ -23,6 +23,7 @@ from llm_worker.config import load_config
 from llm_worker.executor import BatchExecutor, Deferred, RowOutcome
 from llm_worker.providers import create_provider, load_provider_config
 from llm_worker.logging_setup import configure_logging
+from llm_worker.throttle import ThrottleGate
 
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -293,6 +294,10 @@ def run():
         config.max_workers,
         config.retry_max_attempts,
         config.retry_max_backoff,
+        throttle_gate=ThrottleGate(
+            config.throttle_pause_min_seconds, config.throttle_pause_max_seconds
+        ),
+        stop_event=stop_event,
     )
     # The service publishes the worker info at startup and then periodically.
     service = LLMWorkerService(
