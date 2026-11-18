@@ -42,7 +42,10 @@ class BatchExecutor:
     def _complete_with_retry(self, request: ContractRequest):
         retrying = Retrying(
             retry=retry_if_exception(
-                lambda exc: self._provider.classify_error(exc) == ErrorDisposition.RETRY
+                lambda exc: (
+                    self._provider.classify_error(exc)
+                    in (ErrorDisposition.RETRY, ErrorDisposition.THROTTLED)
+                )
             ),
             stop=stop_after_attempt(self._retry_max_attempts),
             wait=wait_exponential(multiplier=1, max=self._retry_max_backoff),

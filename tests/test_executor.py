@@ -34,8 +34,13 @@ class _Auth(Exception):
     pass
 
 
+class _Throttled(Exception):
+    pass
+
+
 _DISPOSITIONS = {
     _Retryable: ErrorDisposition.RETRY,
+    _Throttled: ErrorDisposition.THROTTLED,
     _Auth: ErrorDisposition.ABORT_BATCH,
     _Fatal: ErrorDisposition.FAIL_ROW,
 }
@@ -170,6 +175,21 @@ class TestRetry:
         result = _executor(provider, retry_max_attempts=3).invoke(_make_input())
 
         assert result.status == "failed"
+        assert provider.calls == 3
+
+    def test_throttled_is_retried_like_retry(self):
+        calls = {"n": 0}
+
+        def throttled_twice(*a):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise _Throttled("slow down")
+            return LLMResponse({"output_text": "done"}, 0, 0)
+
+        provider = FakeProvider(throttled_twice)
+        result = _executor(provider, retry_max_attempts=5).invoke(_make_input())
+
+        assert result.status == "complete"
         assert provider.calls == 3
 
     def test_no_retry_on_fail_row(self):

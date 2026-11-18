@@ -107,6 +107,7 @@ class ErrorDisposition(Enum):
     """How the executor should treat a backend error."""
 
     RETRY = "retry"  # transient — retry the call
+    THROTTLED = "throttled"  # backend rate limit or overload — back off
     ABORT_BATCH = "abort_batch"  # e.g. auth failure — abort the whole batch
     FAIL_ROW = "fail_row"  # permanent for this row — fail it, keep going
 
