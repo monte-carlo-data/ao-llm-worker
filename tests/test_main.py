@@ -8,6 +8,7 @@ import pytest
 from clickhouse_connect.driver.exceptions import ClickHouseError
 
 from llm_worker.clickhouse import LLMResult
+from llm_worker.executor import Deferred
 from llm_worker.main import (
     WORKER_INFO_REPUBLISH_SECONDS,
     WORKER_INFO_RETRY_SECONDS,
@@ -229,6 +230,65 @@ class TestBatchWrites:
             service.process_single_batch(BATCH_1)
 
         assert ch.write_results.call_count == 1
+
+
+class TestDeferredRows:
+    def _deferred(self, n):
+        return Deferred(BATCH_1, UUID(int=n), "model-1")
+
+    def _complete(self, n):
+        return LLMResult(BATCH_1, UUID(int=n), '{"output_text":"ok"}', "complete", "")
+
+    def test_writes_only_completed_rows_from_a_page(self):
+        ch = MagicMock()
+        executor = MagicMock()
+        ch.get_batch_rows.side_effect = [[MagicMock(), MagicMock()], []]
+        ch.get_batch_counts.return_value = (2, 1, 0)
+        executor.process_batch_iter.return_value = iter(
+            [self._complete(1), self._deferred(2)]
+        )
+        service = _make_service(ch_mock=ch, executor_mock=executor)
+
+        service.process_single_batch(BATCH_1)
+
+        ch.write_results.assert_called_once_with([self._complete(1)])
+
+    def test_deferred_turn_does_not_mark_batch_complete(self):
+        ch = MagicMock()
+        executor = MagicMock()
+        ch.get_batch_rows.side_effect = [[MagicMock()], []]
+        ch.get_batch_counts.return_value = (1, 0, 0)
+        executor.process_batch_iter.return_value = iter([self._deferred(1)])
+        service = _make_service(ch_mock=ch, executor_mock=executor)
+
+        service.process_single_batch(BATCH_1)
+
+        ch.write_batch_status.assert_not_called()
+        ch.write_results.assert_not_called()
+
+    def test_deferred_page_ends_the_turn_without_refetching(self):
+        ch = MagicMock()
+        executor = MagicMock()
+        ch.get_batch_rows.side_effect = [[MagicMock()], [MagicMock()], []]
+        ch.get_batch_counts.return_value = (2, 0, 0)
+        executor.process_batch_iter.return_value = iter([self._deferred(1)])
+        service = _make_service(ch_mock=ch, executor_mock=executor)
+
+        service.process_single_batch(BATCH_1)
+
+        assert ch.get_batch_rows.call_count == 1
+
+    def test_batch_without_deferrals_is_still_marked_complete(self):
+        ch = MagicMock()
+        executor = MagicMock()
+        ch.get_batch_rows.side_effect = [[MagicMock()], []]
+        ch.get_batch_counts.return_value = (1, 1, 0)
+        executor.process_batch_iter.return_value = iter([self._complete(1)])
+        service = _make_service(ch_mock=ch, executor_mock=executor)
+
+        service.process_single_batch(BATCH_1)
+
+        assert ch.write_batch_status.call_args.args[1] == "complete"
 
 
 class TestBatchPaging:

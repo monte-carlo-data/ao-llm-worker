@@ -11,6 +11,8 @@ import logging
 import threading
 from collections.abc import Iterator
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from dataclasses import dataclass
+from uuid import UUID
 
 from tenacity import (
     Retrying,
@@ -24,6 +26,20 @@ from llm_worker.contract import ContractRequest, build_request
 from llm_worker.providers.base import ErrorDisposition, LLMProvider
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class Deferred:
+    """A row the backend throttled. Nothing is written for it, so the batch
+    stays pending and a later turn fetches the row again."""
+
+    batch_id: UUID
+    row_id: UUID
+    model_id: str
+
+
+# What the executor yields for each row: a result to write, or a deferral.
+RowOutcome = LLMResult | Deferred
 
 
 class BatchExecutor:
@@ -169,7 +185,7 @@ class BatchExecutor:
                 error=str(e),
             )
 
-    def process_batch_iter(self, inputs: list[LLMInput]) -> Iterator[LLMResult]:
+    def process_batch_iter(self, inputs: list[LLMInput]) -> Iterator[RowOutcome]:
         abort_event = threading.Event()
         pending_inputs = iter(inputs)
         aborted_rows: list[LLMInput] = []
@@ -222,5 +238,5 @@ class BatchExecutor:
             )
             yield self._aborted_result(row)
 
-    def process_batch(self, inputs: list[LLMInput]) -> list[LLMResult]:
+    def process_batch(self, inputs: list[LLMInput]) -> list[RowOutcome]:
         return list(self.process_batch_iter(inputs))

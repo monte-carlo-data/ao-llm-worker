@@ -20,7 +20,7 @@ from tenacity import (
 
 from llm_worker.clickhouse import ClickHouseClient, LLMResult
 from llm_worker.config import load_config
-from llm_worker.executor import BatchExecutor
+from llm_worker.executor import BatchExecutor, Deferred, RowOutcome
 from llm_worker.providers import create_provider, load_provider_config
 from llm_worker.logging_setup import configure_logging
 
@@ -118,6 +118,7 @@ class LLMWorkerService:
 
     def process_single_batch(self, batch_id: UUID) -> None:
         saw_rows = False
+        deferred_rows = 0
 
         while True:
             rows = self._ch.get_batch_rows(batch_id)
@@ -132,8 +133,29 @@ class LLMWorkerService:
                 "batch_page_fetched",
                 extra={"batch_id": str(batch_id), "rows": len(rows)},
             )
-            self._write_results_in_chunks(self._executor.process_batch_iter(rows))
+            deferred_rows += self._write_results_in_chunks(
+                self._executor.process_batch_iter(rows)
+            )
             self._maybe_publish_worker_info()
+            # Deferred rows have no result, so the next page would fetch them
+            # again straight away. End the turn and let a later poll retry them.
+            if deferred_rows:
+                break
+
+        if deferred_rows:
+            total_rows, total_completed, total_failed = self._ch.get_batch_counts(
+                batch_id
+            )
+            logger.info(
+                "batch_deferred",
+                extra={
+                    "batch_id": str(batch_id),
+                    "deferred_rows": deferred_rows,
+                    "completed": total_completed,
+                    "failed": total_failed,
+                },
+            )
+            return
 
         if not saw_rows:
             total_rows, total_completed, total_failed = self._ch.get_batch_counts(
@@ -171,10 +193,15 @@ class LLMWorkerService:
             extra={"batch_id": str(batch_id), "status": "complete"},
         )
 
-    def _write_results_in_chunks(self, results: Iterable[LLMResult]) -> None:
+    def _write_results_in_chunks(self, results: Iterable[RowOutcome]) -> int:
+        """Write results in chunks and return how many rows were deferred."""
         pending: list[LLMResult] = []
+        deferred = 0
 
         for result in results:
+            if isinstance(result, Deferred):
+                deferred += 1
+                continue
             pending.append(result)
             if len(pending) >= RESULT_WRITE_BATCH_SIZE:
                 self._write_results_with_retry(pending)
@@ -182,6 +209,7 @@ class LLMWorkerService:
 
         if pending:
             self._write_results_with_retry(pending)
+        return deferred
 
     def _write_results_with_retry(self, results: list[LLMResult]) -> None:
         retrying = Retrying(
