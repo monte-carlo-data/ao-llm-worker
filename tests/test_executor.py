@@ -587,3 +587,55 @@ class TestThrottle:
         assert by_row[UUID(int=3)] == Deferred(BATCH_1, UUID(int=3), "model-3")
         assert by_row[UUID(int=0)].status == "complete"
         assert by_row[UUID(int=2)].status == "complete"
+
+
+class TestThrottleRowAge:
+    @staticmethod
+    def _always_throttled(*a):
+        raise _Throttled("slow down")
+
+    def test_row_just_under_the_limit_is_deferred(self):
+        executor = BatchExecutor(
+            FakeProvider(self._always_throttled),
+            1,
+            1,
+            0,
+            throttle_gate=ThrottleGate(0.01, 0.01),
+            max_row_age_seconds=600,
+        )
+
+        result = executor.invoke(_make_input(age_seconds=599))
+
+        assert result == Deferred(BATCH_1, ROW_1, "model-1")
+
+    def test_row_at_the_limit_fails(self):
+        executor = BatchExecutor(
+            FakeProvider(self._always_throttled),
+            1,
+            1,
+            0,
+            throttle_gate=ThrottleGate(0.01, 0.01),
+            max_row_age_seconds=600,
+        )
+
+        result = executor.invoke(_make_input(age_seconds=600))
+
+        assert result.status == "failed"
+        assert result.error == "throttled and older than 600 seconds"
+
+    def test_age_limit_only_applies_to_throttles(self):
+        def always(*a):
+            raise _Fatal("bad request")
+
+        executor = BatchExecutor(
+            FakeProvider(always),
+            1,
+            1,
+            0,
+            throttle_gate=ThrottleGate(0.01, 0.01),
+            max_row_age_seconds=600,
+        )
+
+        result = executor.invoke(_make_input(age_seconds=10_000))
+
+        assert result.error == "bad request"

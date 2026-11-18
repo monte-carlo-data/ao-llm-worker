@@ -298,6 +298,7 @@ def run():
             config.throttle_pause_min_seconds, config.throttle_pause_max_seconds
         ),
         stop_event=stop_event,
+        max_row_age_seconds=config.throttle_max_row_age_seconds,
     )
     # The service publishes the worker info at startup and then periodically.
     service = LLMWorkerService(

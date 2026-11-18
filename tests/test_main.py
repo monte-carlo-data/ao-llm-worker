@@ -459,7 +459,9 @@ class TestBatchStatusWrite:
 
 def _service_config(mocker):
     return mocker.MagicMock(
-        throttle_pause_min_seconds=1.0, throttle_pause_max_seconds=60.0
+        throttle_pause_min_seconds=1.0,
+        throttle_pause_max_seconds=60.0,
+        throttle_max_row_age_seconds=600,
     )
 
 
@@ -503,6 +505,7 @@ class TestRunStartup:
 
         executor_kwargs = executor_cls.call_args.kwargs
         assert isinstance(executor_kwargs["throttle_gate"], ThrottleGate)
+        assert executor_kwargs["max_row_age_seconds"] == 600
         assert isinstance(executor_kwargs["stop_event"], threading.Event)
         assert (
             executor_kwargs["stop_event"] is service_cls.call_args.kwargs["stop_event"]

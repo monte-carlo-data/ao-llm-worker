@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 # Used when no gate is injected; main.run() passes one built from settings.
 DEFAULT_THROTTLE_PAUSE_MIN_SECONDS = 1.0
 DEFAULT_THROTTLE_PAUSE_MAX_SECONDS = 60.0
+DEFAULT_THROTTLE_MAX_ROW_AGE_SECONDS = 600
 
 
 class _Stopped(Exception):
@@ -72,8 +73,12 @@ class BatchExecutor:
         *,
         throttle_gate: ThrottleGate | None = None,
         stop_event: threading.Event | None = None,
+        max_row_age_seconds: int = DEFAULT_THROTTLE_MAX_ROW_AGE_SECONDS,
     ):
         self._provider = provider
+        # A throttled row this old (seconds since insert) fails instead of being
+        # deferred again, so its batch can't stay pending indefinitely.
+        self._max_row_age_seconds = max_row_age_seconds
         self._max_workers = max_workers
         self._retry_max_attempts = retry_max_attempts
         self._retry_max_backoff = retry_max_backoff
@@ -245,6 +250,26 @@ class BatchExecutor:
                 # An aborted batch completes this turn, so the abort wins.
                 if abort_event and abort_event.is_set():
                     return self._aborted_result(input_row)
+                if input_row.age_seconds >= self._max_row_age_seconds:
+                    error = (
+                        f"throttled and older than {self._max_row_age_seconds} seconds"
+                    )
+                    logger.error(
+                        "row_failed",
+                        extra={
+                            "row_id": str(input_row.row_id),
+                            "error": error,
+                            "error_code": _error_code(e),
+                            "age_seconds": input_row.age_seconds,
+                        },
+                    )
+                    return LLMResult(
+                        batch_id=input_row.batch_id,
+                        row_id=input_row.row_id,
+                        response="",
+                        status="failed",
+                        error=error,
+                    )
                 return self._deferred(input_row, reason=_error_code(e))
             if disposition == ErrorDisposition.ABORT_BATCH and abort_event:
                 logger.error(
