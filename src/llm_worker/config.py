@@ -74,6 +74,13 @@ class ServiceConfig:
     poll_interval: float
     pending_batch_limit: int
     batch_page_size: int
+    # A throttled model pauses for a delay that starts at the minimum and doubles
+    # with each new pause, up to the maximum.
+    throttle_pause_min_seconds: float
+    throttle_pause_max_seconds: float
+    # A throttled row is deferred until it is this old (seconds since it was
+    # inserted), then failed.
+    throttle_max_row_age_seconds: int
 
 
 def _parse_env_int(name: str, default: str, *, min_val: int = 1) -> int:
@@ -168,6 +175,13 @@ def load_config() -> ServiceConfig:
     # Provider-agnostic: config is a leaf module. The composition root (main.run)
     # resolves the provider config and adapter via the providers registry, keeping
     # the dependency one-directional (providers -> config).
+    pause_min = _parse_env_float("THROTTLE_PAUSE_MIN_SECONDS", "1")
+    pause_max = _parse_env_float("THROTTLE_PAUSE_MAX_SECONDS", "60")
+    if pause_max < pause_min:
+        raise ValueError(
+            f"THROTTLE_PAUSE_MAX_SECONDS={pause_max} must be >= "
+            f"THROTTLE_PAUSE_MIN_SECONDS={pause_min}"
+        )
     return ServiceConfig(
         clickhouse=ClickHouseConfig(
             host=os.environ.get("CH_HOST", "localhost"),
@@ -183,4 +197,9 @@ def load_config() -> ServiceConfig:
         poll_interval=_parse_env_float("POLL_INTERVAL", "10"),
         pending_batch_limit=_parse_env_int("PENDING_BATCH_LIMIT", "100"),
         batch_page_size=_parse_env_int("BATCH_PAGE_SIZE", "100"),
+        throttle_pause_min_seconds=pause_min,
+        throttle_pause_max_seconds=pause_max,
+        throttle_max_row_age_seconds=_parse_env_int(
+            "THROTTLE_MAX_ROW_AGE_SECONDS", "600"
+        ),
     )

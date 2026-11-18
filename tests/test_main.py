@@ -1,4 +1,5 @@
 import signal
+import threading
 import time
 from unittest.mock import MagicMock
 from uuid import UUID
@@ -43,6 +44,14 @@ class TestSignalHandling:
         service = _make_service()
         service._handle_signal(signal.SIGTERM, None)
         assert service._should_stop is True
+
+    def test_signal_sets_shared_stop_event(self):
+        stop_event = threading.Event()
+        service = LLMWorkerService(
+            MagicMock(), MagicMock(), 1, worker_info=WORKER_INFO, stop_event=stop_event
+        )
+        service._handle_signal(signal.SIGTERM, None)
+        assert stop_event.is_set()
 
 
 class TestPollingLoop:

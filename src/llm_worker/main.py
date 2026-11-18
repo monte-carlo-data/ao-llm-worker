@@ -3,6 +3,7 @@
 import logging
 import os
 import signal
+import threading
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -54,13 +55,20 @@ class LLMWorkerService:
         poll_interval: float,
         *,
         worker_info: WorkerInfo,
+        stop_event: threading.Event | None = None,
     ):
         self._ch = ch
         self._executor = executor
         self._poll_interval = poll_interval
-        self._should_stop = False
+        # Set on SIGTERM/SIGINT or stop(). An Event rather than a bool so threads
+        # waiting out a throttle pause can share it and wake up promptly.
+        self._stop_event = stop_event or threading.Event()
         self._worker_info = worker_info
         self._worker_info_next_at: float | None = None
+
+    @property
+    def _should_stop(self) -> bool:
+        return self._stop_event.is_set()
 
     def run(self) -> None:
         self._install_signal_handlers()
@@ -229,7 +237,7 @@ class LLMWorkerService:
                 )
 
     def stop(self) -> None:
-        self._should_stop = True
+        self._stop_event.set()
 
     def _install_signal_handlers(self) -> None:
         signal.signal(signal.SIGTERM, self._handle_signal)
@@ -238,7 +246,7 @@ class LLMWorkerService:
     def _handle_signal(self, signum: int, _frame: FrameType | None) -> None:
         sig_name = signal.Signals(signum).name
         logger.info("signal_received", extra={"signal": sig_name})
-        self._should_stop = True
+        self._stop_event.set()
 
 
 def run():
@@ -250,6 +258,8 @@ def run():
         batch_page_size=config.batch_page_size,
     )
     provider = create_provider(provider_config)
+    # One stop signal for the whole worker: the service sets it on SIGTERM/SIGINT.
+    stop_event = threading.Event()
     executor = BatchExecutor(
         provider,
         config.max_workers,
@@ -266,6 +276,7 @@ def run():
             provider=provider_config.provider,
             capabilities=provider.capabilities,
         ),
+        stop_event=stop_event,
     )
     service.run()
 
