@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import anthropic
 import httpx
+from anthropic import _exceptions as anthropic_exceptions
 import pytest
 
 from llm_worker.config import FoundryConfig, VertexConfig
@@ -216,18 +217,48 @@ class TestTemperatureFallback:
         assert client.messages.create.call_count == 1
 
 
+class TestErrorCode:
+    def test_uses_exception_class_name(self, backend, mocker):
+        provider = backend.make(mocker.Mock())
+        exc = _status_error(anthropic.RateLimitError, 429)
+        assert provider.error_code(exc) == "RateLimitError"
+
+
 class TestClassifyError:
-    def test_rate_limit_retries(self, backend, mocker):
+    def test_rate_limit_is_throttled(self, backend, mocker):
         provider = backend.make(mocker.Mock())
         assert (
             provider.classify_error(_status_error(anthropic.RateLimitError, 429))
-            == ErrorDisposition.RETRY
+            == ErrorDisposition.THROTTLED
+        )
+
+    def test_overloaded_is_throttled(self, backend, mocker):
+        provider = backend.make(mocker.Mock())
+        assert (
+            provider.classify_error(_status_error(anthropic.OverloadedError, 529))
+            == ErrorDisposition.THROTTLED
         )
 
     def test_internal_server_retries(self, backend, mocker):
         provider = backend.make(mocker.Mock())
         assert (
             provider.classify_error(_status_error(anthropic.InternalServerError, 500))
+            == ErrorDisposition.RETRY
+        )
+
+    # The Vertex client maps 503 and 504 to these classes, which are not
+    # InternalServerError subclasses.
+    @pytest.mark.parametrize(
+        ("cls", "status"),
+        [
+            (anthropic_exceptions.ServiceUnavailableError, 503),
+            (anthropic_exceptions.DeadlineExceededError, 504),
+        ],
+    )
+    def test_vertex_unavailable_and_deadline_retry(self, backend, mocker, cls, status):
+        provider = backend.make(mocker.Mock())
+        assert (
+            provider.classify_error(_status_error(cls, status))
             == ErrorDisposition.RETRY
         )
 

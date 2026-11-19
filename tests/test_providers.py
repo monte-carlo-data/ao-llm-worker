@@ -17,6 +17,7 @@ def test_load_provider_config_default_bedrock(monkeypatch):
     assert cfg.cloud == "aws"
     assert cfg.region == "us-east-1"
     assert cfg.inference_profiles == {}
+    assert cfg.max_pool_connections == 20
 
 
 def test_bedrock_region_from_env(monkeypatch):

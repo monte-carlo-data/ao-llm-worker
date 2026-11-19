@@ -107,6 +107,7 @@ class ErrorDisposition(Enum):
     """How the executor should treat a backend error."""
 
     RETRY = "retry"  # transient — retry the call
+    THROTTLED = "throttled"  # backend rate limit or overload — back off
     ABORT_BATCH = "abort_batch"  # e.g. auth failure — abort the whole batch
     FAIL_ROW = "fail_row"  # permanent for this row — fail it, keep going
 
@@ -145,6 +146,11 @@ class LLMProvider(ABC):
     @abstractmethod
     def classify_error(self, exc: BaseException) -> ErrorDisposition:
         """Map a backend-native exception to an :class:`ErrorDisposition`."""
+
+    def error_code(self, exc: BaseException) -> str:
+        """A short, content-free name for ``exc``, for logs. Never the message,
+        which may echo request content."""
+        return type(exc).__name__
 
     def _complete_with_temperature_fallback(
         self,

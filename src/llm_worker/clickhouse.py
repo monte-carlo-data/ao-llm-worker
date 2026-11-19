@@ -21,6 +21,9 @@ class LLMInput:
     prompt: str
     params: str
     tool_config: str
+    # Seconds since the row was inserted, measured by ClickHouse when the row is
+    # fetched, so the worker never compares its own clock with created_at.
+    age_seconds: int = 0
 
 
 @dataclass
@@ -146,7 +149,8 @@ class ClickHouseClient:
                 model_id,
                 prompt,
                 params,
-                tool_config
+                tool_config,
+                dateDiff('second', created_at, now()) AS age_seconds
             FROM llm_inputs
             WHERE batch_id = {batch_id:UUID}
               AND row_id NOT IN (
@@ -167,6 +171,7 @@ class ClickHouseClient:
                 prompt=row[3],
                 params=row[4],
                 tool_config=row[5],
+                age_seconds=row[6],
             )
             for row in result.result_rows
         ]
