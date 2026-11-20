@@ -184,6 +184,16 @@ def load_config() -> ServiceConfig:
             f"THROTTLE_PAUSE_MAX_SECONDS={pause_max} must be >= "
             f"THROTTLE_PAUSE_MIN_SECONDS={pause_min}"
         )
+    max_row_age = _parse_env_int(
+        "THROTTLE_MAX_ROW_AGE_SECONDS", str(DEFAULT_THROTTLE_MAX_ROW_AGE_SECONDS)
+    )
+    # A throttled row fails once its age plus the max pause reaches the limit,
+    # so a limit at or below the max pause would fail every throttled row.
+    if max_row_age <= pause_max:
+        raise ValueError(
+            f"THROTTLE_MAX_ROW_AGE_SECONDS={max_row_age} must be > "
+            f"THROTTLE_PAUSE_MAX_SECONDS={pause_max}"
+        )
     return ServiceConfig(
         clickhouse=ClickHouseConfig(
             host=os.environ.get("CH_HOST", "localhost"),
@@ -201,7 +211,5 @@ def load_config() -> ServiceConfig:
         batch_page_size=_parse_env_int("BATCH_PAGE_SIZE", "100"),
         throttle_pause_min_seconds=pause_min,
         throttle_pause_max_seconds=pause_max,
-        throttle_max_row_age_seconds=_parse_env_int(
-            "THROTTLE_MAX_ROW_AGE_SECONDS", str(DEFAULT_THROTTLE_MAX_ROW_AGE_SECONDS)
-        ),
+        throttle_max_row_age_seconds=max_row_age,
     )
