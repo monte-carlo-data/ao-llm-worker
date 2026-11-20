@@ -495,6 +495,18 @@ class TestThrottle:
         assert gate.on_throttle("model-1", call_started_at=gate.now()) is None
         assert gate.on_throttle("model-2", call_started_at=gate.now()) == 30.0
 
+    def test_prefixed_and_bare_ids_share_a_pause(self):
+        def always(*a):
+            raise _Throttled("slow down")
+
+        gate = ThrottleGate(30.0, 30.0)
+        _executor(FakeProvider(always), throttle_gate=gate).invoke(
+            _make_input(model_id="mc:model-1")
+        )
+
+        # The throttle on "mc:model-1" started the pause for "model-1".
+        assert gate.on_throttle("model-1", call_started_at=gate.now()) is None
+
     def test_success_is_reported_to_the_gate(self, mocker):
         gate = mocker.Mock(spec=ThrottleGate)
         gate.wait.return_value = True

@@ -29,7 +29,7 @@ from llm_worker.config import (
     DEFAULT_THROTTLE_PAUSE_MAX_SECONDS,
     DEFAULT_THROTTLE_PAUSE_MIN_SECONDS,
 )
-from llm_worker.contract import ContractRequest, build_request
+from llm_worker.contract import ContractRequest, build_request, resolve_model_ref
 from llm_worker.providers.base import ErrorDisposition, LLMProvider
 from llm_worker.throttle import ThrottleGate
 
@@ -105,7 +105,9 @@ class BatchExecutor:
     ):
         """One call attempt: wait out the model's pause, call the provider, and
         report the outcome to the gate."""
-        model_id = request.model_id
+        # Keyed on the resolved model, so prefixed and bare ids for the same
+        # model share one pause, as they share one quota.
+        model_id = resolve_model_ref(request.model_id)
         # A stopping worker starts no new calls, leaving the row for the next
         # one, and an aborted batch makes no more calls. Either one also wakes a
         # row waiting out a pause.
