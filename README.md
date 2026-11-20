@@ -87,20 +87,29 @@ A throttled call doesn't fail its row. Throttles are Bedrock's
 - **The model pauses.** Every worker thread stops calling that model for
   `THROTTLE_PAUSE_MIN_SECONDS`, and each new pause doubles, up to
   `THROTTLE_PAUSE_MAX_SECONDS`. A burst of throttles grows the pause once. A
-  success resets the next pause to the minimum. Other models keep running.
+  success resets the next pause to the minimum. Other models aren't paused:
+  rows for other models in the same page keep running. Batches are handled one
+  at a time, though, so a batch waiting on a paused model delays the batches
+  after it.
 - **The turn ends.** After a page with deferred rows, the worker moves on to the
   next batch instead of fetching the same rows again. When every batch in a
   pass deferred rows, it waits `POLL_INTERVAL` before polling again.
 - **Old rows fail.** A throttled row fails with `throttled and older than N
   seconds` once its age plus `THROTTLE_PAUSE_MAX_SECONDS` reaches
-  `THROTTLE_MAX_ROW_AGE_SECONDS`, because its next attempt can't come sooner.
-  This keeps a batch from staying pending indefinitely. ClickHouse measures the
-  age from the row's `created_at`, and the worker adds the time since it
-  fetched the row. A row already past the limit fails rather than waiting out a
-  pause. Set the limit so that it, plus the time a full pass over pending
-  batches can take, stays below how long the reader of a batch waits for it to
-  complete. With many batches throttled on the same model, a pass can take
-  several pauses.
+  `THROTTLE_MAX_ROW_AGE_SECONDS`. This keeps a batch from staying pending
+  indefinitely. A deferred row is tried again on its batch's next turn, one
+  pass over pending batches later, so adding the max pause is a heuristic that
+  leaves room for one more pause before the limit, not a bound on when the next
+  attempt comes. ClickHouse measures the age from the row's `created_at`, and
+  the worker adds the time since it fetched the row. A row past the limit still
+  waits out its model's pause and gets one call; it fails only if that call is
+  throttled too. The limit must be greater than `THROTTLE_PAUSE_MAX_SECONDS`.
+- **Late results under sustained throttling.** The worker doesn't know how
+  long the reader of a batch waits for it. Batches are handled one at a time,
+  and each turn on a batch throttled on a paused model waits out the pause, so
+  under sustained throttling a pass can take several pauses. A deferred row can
+  then come back after the reader has stopped waiting, and the reader times out
+  instead of seeing per-row errors.
 
 Other transient errors, such as 5xx responses (including Vertex 503 and 504),
 timeouts and connection errors, are retried up to `RETRY_MAX_ATTEMPTS` and then
@@ -108,13 +117,23 @@ fail the row.
 
 The worker logs `llm_throttle_pause` when a model pauses and `row_deferred` for
 each deferred row. A turn that deferred rows logs `batch_deferred` instead of
-`batch_completed`. These logs carry error codes, never prompt or response content.
+`batch_completed`, and a turn cut short by shutdown logs `batch_interrupted`.
+These logs carry error codes, never prompt or response content.
 
 ### Shutdown
 
-On SIGTERM or SIGINT the worker finishes the page in progress and exits. Rows
-waiting out a throttle pause or a retry backoff are deferred, not failed, and
-the batch's remaining rows stay `pending` for the next worker.
+On SIGTERM or SIGINT the worker stops starting new provider calls, waits for
+the calls already in flight, writes their results and exits. Rows in the page
+that haven't started, and rows waiting out a throttle pause or a retry backoff,
+are deferred as `stopping`, not failed. They and the batch's remaining pages
+stay `pending` for the next worker.
+
+Each in-flight call can take up to the client timeout (120 seconds) on each of
+the SDK's own attempts: botocore makes 5 attempts by default, and the Anthropic
+SDK retries twice. Size the termination grace period with that in mind. If the
+worker is killed before it finishes, results it hasn't written yet (they are
+written in chunks of 50) are lost, and the next worker processes those rows
+again.
 
 ## Quick start
 
@@ -194,7 +213,7 @@ Model selection is per-request via each input row's `model_id`, not env-configur
 | `BATCH_PAGE_SIZE`     | `100`   | Input rows fetched per page within a batch     |
 | `THROTTLE_PAUSE_MIN_SECONDS` | `1` | First pause for a throttled model, in seconds |
 | `THROTTLE_PAUSE_MAX_SECONDS` | `60` | Longest pause for a throttled model, in seconds |
-| `THROTTLE_MAX_ROW_AGE_SECONDS` | `600` | Age (seconds since insert) at which a throttled row fails instead of being deferred; see [Throttling](#throttling) |
+| `THROTTLE_MAX_ROW_AGE_SECONDS` | `600` | A throttled row fails instead of being deferred once its age (seconds since insert) plus `THROTTLE_PAUSE_MAX_SECONDS` reaches this (540s of age with the defaults). Must be greater than `THROTTLE_PAUSE_MAX_SECONDS`; see [Throttling](#throttling) |
 
 ## Testing
 

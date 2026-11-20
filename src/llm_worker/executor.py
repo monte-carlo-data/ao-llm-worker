@@ -351,7 +351,7 @@ class BatchExecutor:
         # Every row's age is measured from when its page was received.
         received_at = self._gate.now()
         rows_by_id = {row.row_id: row for row in inputs}
-        # Deferrals are held back until the batch finishes, so an abort that
+        # Deferrals are held back until the page finishes, so an abort that
         # happens later in the page still wins over them.
         deferred: list[Deferred] = []
         with ThreadPoolExecutor(max_workers=self._max_workers) as executor:

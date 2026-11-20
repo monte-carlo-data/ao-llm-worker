@@ -134,7 +134,7 @@ class LLMWorkerService:
         worker doesn't publish.
         """
         # After a rollback, the replacement worker's startup row must stay the
-        # newest, so a worker finishing its batch during shutdown doesn't write.
+        # newest, so a worker finishing its page during shutdown doesn't write.
         if self._should_stop:
             return
         now = time.monotonic()
