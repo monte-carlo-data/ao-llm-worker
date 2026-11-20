@@ -67,14 +67,14 @@ class LLMWorkerService:
         poll_interval: float,
         *,
         worker_info: WorkerInfo,
-        stop_event: threading.Event | None = None,
+        stop_event: threading.Event,
     ):
         self._ch = ch
         self._executor = executor
         self._poll_interval = poll_interval
         # Set on SIGTERM/SIGINT or stop(). An Event rather than a bool so threads
         # waiting out a throttle pause can share it and wake up promptly.
-        self._stop_event = stop_event or threading.Event()
+        self._stop_event = stop_event
         self._worker_info = worker_info
         self._worker_info_next_at: float | None = None
 

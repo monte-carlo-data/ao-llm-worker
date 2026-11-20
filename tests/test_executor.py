@@ -79,6 +79,7 @@ def _executor(
     retry_max_backoff=0,
     throttle_gate=None,
     stop_event=None,
+    max_row_age_seconds=600,
 ):
     return BatchExecutor(
         provider,
@@ -87,7 +88,8 @@ def _executor(
         retry_max_backoff,
         # Short pauses so throttled tests don't sit out the production default.
         throttle_gate=throttle_gate or ThrottleGate(0.01, 0.01),
-        stop_event=stop_event,
+        stop_event=stop_event or threading.Event(),
+        max_row_age_seconds=max_row_age_seconds,
     )
 
 
@@ -676,13 +678,10 @@ class TestThrottleRowAge:
         raise _Throttled("slow down")
 
     def test_row_well_under_the_limit_is_deferred(self):
-        executor = BatchExecutor(
+        executor = _executor(
             FakeProvider(self._always_throttled),
-            1,
-            1,
-            0,
+            max_workers=1,
             throttle_gate=ThrottleGate(0.01, 0.01),
-            max_row_age_seconds=600,
         )
 
         result = executor.invoke(_make_input(age_seconds=500))
@@ -690,13 +689,10 @@ class TestThrottleRowAge:
         assert result == Deferred(BATCH_1, ROW_1, "model-1")
 
     def test_row_at_the_limit_fails(self):
-        executor = BatchExecutor(
+        executor = _executor(
             FakeProvider(self._always_throttled),
-            1,
-            1,
-            0,
+            max_workers=1,
             throttle_gate=ThrottleGate(0.01, 0.01),
-            max_row_age_seconds=600,
         )
 
         result = executor.invoke(_make_input(age_seconds=600))
@@ -708,13 +704,8 @@ class TestThrottleRowAge:
         def always(*a):
             raise _Fatal("bad request")
 
-        executor = BatchExecutor(
-            FakeProvider(always),
-            1,
-            1,
-            0,
-            throttle_gate=ThrottleGate(0.01, 0.01),
-            max_row_age_seconds=600,
+        executor = _executor(
+            FakeProvider(always), max_workers=1, throttle_gate=ThrottleGate(0.01, 0.01)
         )
 
         result = executor.invoke(_make_input(age_seconds=10_000))
@@ -746,13 +737,8 @@ class TestThrottleRowAgeIsCurrent:
             clock.advance(20)
             raise _Throttled("slow down")
 
-        executor = BatchExecutor(
-            FakeProvider(advance_then_throttle),
-            1,
-            1,
-            0,
-            throttle_gate=gate,
-            max_row_age_seconds=600,
+        executor = _executor(
+            FakeProvider(advance_then_throttle), max_workers=1, throttle_gate=gate
         )
 
         result = executor.invoke(_make_input(age_seconds=590))
@@ -761,13 +747,10 @@ class TestThrottleRowAgeIsCurrent:
         assert result.error == "throttled and older than 600 seconds"
 
     def test_row_near_the_limit_fails_instead_of_deferring(self):
-        executor = BatchExecutor(
+        executor = _executor(
             FakeProvider(self._always_throttled),
-            1,
-            1,
-            0,
+            max_workers=1,
             throttle_gate=ThrottleGate(60.0, 60.0),
-            max_row_age_seconds=600,
         )
 
         result = executor.invoke(_make_input(age_seconds=550))
@@ -779,9 +762,7 @@ class TestThrottleRowAgeIsCurrent:
         gate = ThrottleGate(0.2, 0.2)
         gate.on_throttle("model-1", call_started_at=gate.now())
         provider = FakeProvider()
-        executor = BatchExecutor(
-            provider, 1, 1, 0, throttle_gate=gate, max_row_age_seconds=600
-        )
+        executor = _executor(provider, max_workers=1, throttle_gate=gate)
 
         started = time.monotonic()
         result = executor.invoke(_make_input(age_seconds=700))
@@ -794,9 +775,7 @@ class TestThrottleRowAgeIsCurrent:
         gate = ThrottleGate(0.05, 0.05)
         gate.on_throttle("model-1", call_started_at=gate.now())
         provider = FakeProvider(self._always_throttled)
-        executor = BatchExecutor(
-            provider, 1, 1, 0, throttle_gate=gate, max_row_age_seconds=600
-        )
+        executor = _executor(provider, max_workers=1, throttle_gate=gate)
 
         result = executor.invoke(_make_input(age_seconds=700))
 
@@ -820,13 +799,10 @@ class TestThrottleRowAgeIsCurrent:
             _make_input(row_id=UUID(int=i), prompt=f"p{i}", age_seconds=700)
             for i in range(100)
         ]
-        executor = BatchExecutor(
+        executor = _executor(
             FakeProvider(throttle_first_call),
-            20,
-            1,
-            0,
+            max_workers=20,
             throttle_gate=ThrottleGate(0.05, 0.05),
-            max_row_age_seconds=600,
         )
 
         outcomes = executor.process_batch(inputs)
@@ -839,13 +815,8 @@ class TestThrottleRowAgeIsCurrent:
 
     def test_old_row_still_gets_a_call_when_the_model_is_not_paused(self):
         provider = FakeProvider()
-        executor = BatchExecutor(
-            provider,
-            1,
-            1,
-            0,
-            throttle_gate=ThrottleGate(2.0, 2.0),
-            max_row_age_seconds=600,
+        executor = _executor(
+            provider, max_workers=1, throttle_gate=ThrottleGate(2.0, 2.0)
         )
 
         result = executor.invoke(_make_input(age_seconds=10_000))

@@ -1,3 +1,4 @@
+import threading
 import time
 from uuid import UUID
 
@@ -91,6 +92,7 @@ def _get_batch_status(ch_client, batch_id):
 
 def _make_service(ch_client, mock_boto, max_row_age_seconds=600):
     provider = BedrockProvider(BEDROCK_CONFIG, boto_client=mock_boto)
+    stop_event = threading.Event()
     executor = BatchExecutor(
         provider,
         max_workers=2,
@@ -98,6 +100,7 @@ def _make_service(ch_client, mock_boto, max_row_age_seconds=600):
         retry_max_backoff=0,
         # Short pauses so throttled tests don't wait out the default.
         throttle_gate=ThrottleGate(0.01, 0.01),
+        stop_event=stop_event,
         max_row_age_seconds=max_row_age_seconds,
     )
     return LLMWorkerService(
@@ -105,6 +108,7 @@ def _make_service(ch_client, mock_boto, max_row_age_seconds=600):
         executor,
         poll_interval=1,
         worker_info=WorkerInfo("aws", "bedrock", BedrockProvider.capabilities),
+        stop_event=stop_event,
     )
 
 

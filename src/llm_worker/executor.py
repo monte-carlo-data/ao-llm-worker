@@ -24,11 +24,6 @@ from tenacity import (
 )
 
 from llm_worker.clickhouse import LLMInput, LLMResult
-from llm_worker.config import (
-    DEFAULT_THROTTLE_MAX_ROW_AGE_SECONDS,
-    DEFAULT_THROTTLE_PAUSE_MAX_SECONDS,
-    DEFAULT_THROTTLE_PAUSE_MIN_SECONDS,
-)
 from llm_worker.contract import ContractRequest, build_request, resolve_model_ref
 from llm_worker.providers.base import ErrorDisposition, LLMProvider
 from llm_worker.throttle import ThrottleGate
@@ -78,9 +73,9 @@ class BatchExecutor:
         retry_max_attempts: int,
         retry_max_backoff: int,
         *,
-        throttle_gate: ThrottleGate | None = None,
-        stop_event: threading.Event | None = None,
-        max_row_age_seconds: int = DEFAULT_THROTTLE_MAX_ROW_AGE_SECONDS,
+        throttle_gate: ThrottleGate,
+        stop_event: threading.Event,
+        max_row_age_seconds: int,
     ):
         self._provider = provider
         # A row whose current age (seconds since insert) plus the longest possible
@@ -90,12 +85,11 @@ class BatchExecutor:
         self._max_workers = max_workers
         self._retry_max_attempts = retry_max_attempts
         self._retry_max_backoff = retry_max_backoff
-        self._gate = throttle_gate or ThrottleGate(
-            DEFAULT_THROTTLE_PAUSE_MIN_SECONDS, DEFAULT_THROTTLE_PAUSE_MAX_SECONDS
-        )
+        # Shared by every executor thread, and built from the worker's settings.
+        self._gate = throttle_gate
         # Set when the worker is stopping; wakes threads waiting out a pause or a
-        # retry backoff.
-        self._stop_event = stop_event or threading.Event()
+        # retry backoff. The worker's signal handler sets this same event.
+        self._stop_event = stop_event
 
     def _interruptible_sleep(self, seconds: float) -> None:
         self._stop_event.wait(seconds)

@@ -31,7 +31,13 @@ def _make_service(ch_mock=None, executor_mock=None, poll_interval: float = 1):
     executor = executor_mock or MagicMock()
     if not hasattr(executor, "process_batch_iter"):
         executor.process_batch_iter = MagicMock(return_value=iter(()))
-    return LLMWorkerService(ch, executor, poll_interval, worker_info=WORKER_INFO)
+    return LLMWorkerService(
+        ch,
+        executor,
+        poll_interval,
+        worker_info=WORKER_INFO,
+        stop_event=threading.Event(),
+    )
 
 
 class TestSignalHandling:
@@ -783,7 +789,13 @@ class TestSigtermDuringThrottlePause:
         gate.on_throttle("model-1", call_started_at=gate.now())
         provider = MagicMock()
         executor = BatchExecutor(
-            provider, 3, 5, 0, throttle_gate=gate, stop_event=stop_event
+            provider,
+            3,
+            5,
+            0,
+            throttle_gate=gate,
+            stop_event=stop_event,
+            max_row_age_seconds=600,
         )
         ch = MagicMock()
         ch.get_pending_batches.return_value = [BATCH_1]
