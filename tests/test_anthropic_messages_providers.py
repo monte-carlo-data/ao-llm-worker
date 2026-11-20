@@ -216,12 +216,39 @@ class TestTemperatureFallback:
         assert client.messages.create.call_count == 1
 
 
+def _sdk_status_error(client, status):
+    """The error the SDK client itself raises for an HTTP status."""
+    if client == "vertex":
+        sdk = anthropic.AnthropicVertex(
+            region="us-east5", project_id="p", access_token="t"
+        )
+    else:
+        sdk = anthropic.Anthropic(api_key="k")
+    request = httpx.Request("POST", "https://anthropic.example.com")
+    response = httpx.Response(status, request=request)
+    return sdk._make_status_error("err", body=None, response=response)
+
+
+class TestErrorCode:
+    def test_uses_exception_class_name(self, backend, mocker):
+        provider = backend.make(mocker.Mock())
+        exc = _status_error(anthropic.RateLimitError, 429)
+        assert provider.error_code(exc) == "RateLimitError"
+
+
 class TestClassifyError:
-    def test_rate_limit_retries(self, backend, mocker):
+    def test_rate_limit_is_throttled(self, backend, mocker):
         provider = backend.make(mocker.Mock())
         assert (
             provider.classify_error(_status_error(anthropic.RateLimitError, 429))
-            == ErrorDisposition.RETRY
+            == ErrorDisposition.THROTTLED
+        )
+
+    def test_overloaded_is_throttled(self, backend, mocker):
+        provider = backend.make(mocker.Mock())
+        assert (
+            provider.classify_error(_status_error(anthropic.OverloadedError, 529))
+            == ErrorDisposition.THROTTLED
         )
 
     def test_internal_server_retries(self, backend, mocker):
@@ -230,6 +257,25 @@ class TestClassifyError:
             provider.classify_error(_status_error(anthropic.InternalServerError, 500))
             == ErrorDisposition.RETRY
         )
+
+    # Errors as the real SDK clients build them from a status code. The Vertex
+    # client maps 503 and 504 to classes outside InternalServerError, and 529 to
+    # InternalServerError; the base client (used by Foundry) maps 529 to
+    # OverloadedError.
+    @pytest.mark.parametrize("client", ["vertex", "base"])
+    @pytest.mark.parametrize(
+        ("status", "disposition"),
+        [
+            (429, ErrorDisposition.THROTTLED),
+            (529, ErrorDisposition.THROTTLED),
+            (500, ErrorDisposition.RETRY),
+            (503, ErrorDisposition.RETRY),
+            (504, ErrorDisposition.RETRY),
+        ],
+    )
+    def test_sdk_status_errors(self, backend, mocker, client, status, disposition):
+        provider = backend.make(mocker.Mock())
+        assert provider.classify_error(_sdk_status_error(client, status)) == disposition
 
     def test_timeout_retries(self, backend, mocker):
         provider = backend.make(mocker.Mock())

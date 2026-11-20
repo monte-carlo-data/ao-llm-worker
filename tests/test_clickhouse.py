@@ -101,6 +101,21 @@ class TestGetPendingBatches:
 
 
 class TestGetBatchRows:
+    def test_reports_row_age_from_created_at(self, ch_client):
+        _insert_input(ch_client, BATCH_1, ROW_1)
+        ch_client._client.command(
+            """INSERT INTO llm_inputs
+                (batch_id, row_id, model_id, prompt, params, tool_config, created_at)
+            SELECT {batch_id:UUID}, {row_id:UUID}, 'test-model', 'p', '{}', '',
+                now() - toIntervalMinute(20)""",
+            parameters={"batch_id": BATCH_1, "row_id": ROW_2},
+        )
+
+        ages = {r.row_id: r.age_seconds for r in ch_client.get_batch_rows(BATCH_1)}
+
+        assert 0 <= ages[ROW_1] < 60
+        assert 1200 <= ages[ROW_2] < 1260
+
     def test_returns_all_rows(self, ch_client):
         _insert_input(ch_client, BATCH_1, ROW_1, "model-a", "prompt 1")
         _insert_input(ch_client, BATCH_1, ROW_2, "model-a", "prompt 2")

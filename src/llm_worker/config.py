@@ -8,6 +8,11 @@ from llm_worker.contract import resolve_model_ref
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_MAX_WORKERS = 20
+DEFAULT_THROTTLE_PAUSE_MIN_SECONDS = 1.0
+DEFAULT_THROTTLE_PAUSE_MAX_SECONDS = 60.0
+DEFAULT_THROTTLE_MAX_ROW_AGE_SECONDS = 600
+
 
 @dataclass(frozen=True)
 class ClickHouseConfig:
@@ -71,6 +76,11 @@ class ServiceConfig:
     poll_interval: float
     pending_batch_limit: int
     batch_page_size: int
+    # See llm_worker.throttle for how the pause grows.
+    throttle_pause_min_seconds: float
+    throttle_pause_max_seconds: float
+    # See BatchExecutor for how the row-age limit applies.
+    throttle_max_row_age_seconds: int
 
 
 def _parse_env_int(name: str, default: str, *, min_val: int = 1) -> int:
@@ -163,6 +173,27 @@ def load_config() -> ServiceConfig:
     # Provider-agnostic: config is a leaf module. The composition root (main.run)
     # resolves the provider config and adapter via the providers registry, keeping
     # the dependency one-directional (providers -> config).
+    pause_min = _parse_env_float(
+        "THROTTLE_PAUSE_MIN_SECONDS", str(DEFAULT_THROTTLE_PAUSE_MIN_SECONDS)
+    )
+    pause_max = _parse_env_float(
+        "THROTTLE_PAUSE_MAX_SECONDS", str(DEFAULT_THROTTLE_PAUSE_MAX_SECONDS)
+    )
+    if pause_max < pause_min:
+        raise ValueError(
+            f"THROTTLE_PAUSE_MAX_SECONDS={pause_max} must be >= "
+            f"THROTTLE_PAUSE_MIN_SECONDS={pause_min}"
+        )
+    max_row_age = _parse_env_int(
+        "THROTTLE_MAX_ROW_AGE_SECONDS", str(DEFAULT_THROTTLE_MAX_ROW_AGE_SECONDS)
+    )
+    # A throttled row fails once its age plus the max pause reaches the limit,
+    # so a limit at or below the max pause would fail every throttled row.
+    if max_row_age <= pause_max:
+        raise ValueError(
+            f"THROTTLE_MAX_ROW_AGE_SECONDS={max_row_age} must be > "
+            f"THROTTLE_PAUSE_MAX_SECONDS={pause_max}"
+        )
     return ServiceConfig(
         clickhouse=ClickHouseConfig(
             host=os.environ.get("CH_HOST", "localhost"),
@@ -172,10 +203,13 @@ def load_config() -> ServiceConfig:
             database=os.environ.get("CH_DATABASE", "default"),
             ca_cert=os.environ.get("CH_CA_CERT", ""),
         ),
-        max_workers=_parse_env_int("MAX_WORKERS", "20"),
+        max_workers=_parse_env_int("MAX_WORKERS", str(DEFAULT_MAX_WORKERS)),
         retry_max_attempts=_parse_env_int("RETRY_MAX_ATTEMPTS", "5"),
         retry_max_backoff=_parse_env_int("RETRY_MAX_BACKOFF", "30"),
         poll_interval=_parse_env_float("POLL_INTERVAL", "10"),
         pending_batch_limit=_parse_env_int("PENDING_BATCH_LIMIT", "100"),
         batch_page_size=_parse_env_int("BATCH_PAGE_SIZE", "100"),
+        throttle_pause_min_seconds=pause_min,
+        throttle_pause_max_seconds=pause_max,
+        throttle_max_row_age_seconds=max_row_age,
     )

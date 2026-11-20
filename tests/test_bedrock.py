@@ -10,6 +10,7 @@ from llm_worker.providers.base import ErrorDisposition
 from llm_worker.providers.bedrock import (
     NON_RETRYABLE_ERROR_CODES,
     RETRYABLE_ERROR_CODES,
+    THROTTLE_ERROR_CODES,
     BedrockProvider,
     _build_converse_kwargs,
     _extract_output,
@@ -504,8 +505,17 @@ class TestClassifyError:
             "InternalServerException",
             "ModelNotReadyException",
             "ServiceUnavailableException",
-            "ThrottlingException",
         }
+
+    def test_throttle_codes_are_exactly(self):
+        assert THROTTLE_ERROR_CODES == {"ThrottlingException"}
+
+    @pytest.mark.parametrize("code", sorted(THROTTLE_ERROR_CODES))
+    def test_throttle_codes_are_throttled(self, mocker, code):
+        provider = _provider(mocker.Mock())
+        assert (
+            provider.classify_error(_client_error(code)) == ErrorDisposition.THROTTLED
+        )
 
     def test_non_retryable_codes_are_exactly(self):
         assert NON_RETRYABLE_ERROR_CODES == {
@@ -534,6 +544,20 @@ class TestClassifyError:
     def test_generic_exception_fails_row(self, mocker):
         provider = _provider(mocker.Mock())
         assert provider.classify_error(Exception("boom")) == ErrorDisposition.FAIL_ROW
+
+
+class TestErrorCode:
+    def test_client_error_uses_botocore_code(self, mocker):
+        provider = _provider(mocker.Mock())
+        assert (
+            provider.error_code(_client_error("ThrottlingException"))
+            == "ThrottlingException"
+        )
+
+    def test_transport_error_uses_class_name(self, mocker):
+        provider = _provider(mocker.Mock())
+        exc = EndpointConnectionError(endpoint_url="https://x")
+        assert provider.error_code(exc) == "EndpointConnectionError"
 
 
 _SCHEMA = {
@@ -696,6 +720,15 @@ def test_client_waits_120_seconds_and_keeps_botocore_retries(mocker):
     assert config.read_timeout >= 120
     # botocore's retries absorb throttling for every Bedrock model.
     assert config.retries is None
+
+
+def test_client_pool_matches_max_pool_connections(mocker):
+    boto_client = mocker.patch("llm_worker.providers.bedrock.boto3.client")
+
+    BedrockProvider(BedrockConfig(region="us-east-1"), max_pool_connections=37)
+
+    config = boto_client.call_args.kwargs["config"]
+    assert config.max_pool_connections == 37
 
 
 def test_publishes_all_request_profile_capabilities():

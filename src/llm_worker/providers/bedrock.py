@@ -29,7 +29,7 @@ from botocore.exceptions import (
     ReadTimeoutError,
 )
 
-from llm_worker.config import BedrockConfig
+from llm_worker.config import DEFAULT_MAX_WORKERS, BedrockConfig
 from llm_worker.contract import ContractRequest, resolve_model_ref
 from llm_worker.providers.base import (
     ErrorDisposition,
@@ -52,6 +52,11 @@ RETRYABLE_ERROR_CODES = {
     "InternalServerException",
     "ModelNotReadyException",
     "ServiceUnavailableException",
+}
+
+# Quota rejections. Kept apart from RETRYABLE_ERROR_CODES so the executor can
+# back off instead of spending the row's retry budget.
+THROTTLE_ERROR_CODES = {
     "ThrottlingException",
 }
 
@@ -73,7 +78,6 @@ _PROFILE_ARN_COOLDOWN_SECONDS = 300
 # botocore's default read timeout is 60s, and thinking makes replies longer.
 # botocore keeps its own retries, which absorb throttling inside each executor attempt.
 BEDROCK_READ_TIMEOUT_SECONDS = 120
-BEDROCK_CLIENT_CONFIG = Config(read_timeout=BEDROCK_READ_TIMEOUT_SECONDS)
 
 
 def _error_code(exc: ClientError) -> str:
@@ -96,12 +100,22 @@ def _is_retryable(exc: BaseException) -> bool:
 class BedrockProvider(LLMProvider):
     capabilities = ("output_format", "thinking", "effort")
 
-    def __init__(self, config: BedrockConfig, boto_client=None):
+    def __init__(
+        self,
+        config: BedrockConfig,
+        boto_client=None,
+        *,
+        max_pool_connections: int = DEFAULT_MAX_WORKERS,
+    ):
         super().__init__()
         self._client = boto_client or boto3.client(
             "bedrock-runtime",
             region_name=config.region,
-            config=BEDROCK_CLIENT_CONFIG,
+            config=Config(
+                read_timeout=BEDROCK_READ_TIMEOUT_SECONDS,
+                # One connection per worker thread; botocore's default is 10.
+                max_pool_connections=max_pool_connections,
+            ),
         )
         self._inference_profiles = config.inference_profiles
         self._profile_invalid_since: dict[str, float] = {}
@@ -171,9 +185,18 @@ class BedrockProvider(LLMProvider):
         if isinstance(exc, ClientError):
             if _error_code(exc) == "AccessDeniedException":
                 return ErrorDisposition.ABORT_BATCH
+            if _error_code(exc) in THROTTLE_ERROR_CODES:
+                return ErrorDisposition.THROTTLED
         if _is_retryable(exc):
             return ErrorDisposition.RETRY
         return ErrorDisposition.FAIL_ROW
+
+    def error_code(self, exc: BaseException) -> str:
+        if isinstance(exc, ClientError):
+            code = _error_code(exc)
+            if code:
+                return code
+        return super().error_code(exc)
 
 
 def _is_temperature_rejection(exc: ClientError) -> bool:

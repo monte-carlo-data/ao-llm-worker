@@ -23,10 +23,10 @@ and effort to ``output_config.effort``.
 
 from anthropic import (
     APIConnectionError,
+    APIStatusError,
     APITimeoutError,
     AuthenticationError,
     BadRequestError,
-    InternalServerError,
     PermissionDeniedError,
     RateLimitError,
 )
@@ -66,9 +66,15 @@ class AnthropicMessagesProvider(LLMProvider):
         return _to_llm_response(response, request)
 
     def classify_error(self, exc: BaseException) -> ErrorDisposition:
-        if isinstance(
-            exc,
-            (RateLimitError, APIConnectionError, APITimeoutError, InternalServerError),
+        # Classify server errors by status code: the clients map them to
+        # different classes (the Vertex client raises InternalServerError for
+        # 529, and classes outside InternalServerError for 503 and 504).
+        status = exc.status_code if isinstance(exc, APIStatusError) else None
+        # 429 is a quota rejection and 529 is backend overload: both mean back off.
+        if isinstance(exc, RateLimitError) or status == 529:
+            return ErrorDisposition.THROTTLED
+        if isinstance(exc, (APIConnectionError, APITimeoutError)) or (
+            status is not None and status >= 500
         ):
             return ErrorDisposition.RETRY
         if isinstance(exc, (AuthenticationError, PermissionDeniedError)):

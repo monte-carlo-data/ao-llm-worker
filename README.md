@@ -12,7 +12,8 @@ The worker runs a continuous loop:
 2. **Process** -- for each batch, fetch unprocessed input rows in pages and
    invoke the configured LLM provider in parallel (`ThreadPoolExecutor`, `MAX_WORKERS`).
 3. **Write** -- stream results back to ClickHouse in chunks of 50 rows, then
-   mark the batch `complete`.
+   mark the batch `complete`. A batch with throttled rows stays `pending` until
+   a later pass finishes them (see [Throttling](#throttling)).
 
 Reads are idempotent: rows already in `llm_results` are skipped, so the worker
 can safely recover from crashes mid-batch. An auth/permission failure from the
@@ -65,13 +66,74 @@ they apply. Only API errors fail a row. On Bedrock, a refusal arrives as
 record it as a refusal with its category.
 
 The Bedrock client waits up to 120 seconds for a reply and keeps botocore's
-default retries.
+default retries, which absorb short throttles before the worker sees them. Its
+connection pool holds `MAX_WORKERS` connections, one per worker thread.
 
 On the `bedrock` provider, a `converse()` call resolves through a
 cost-attribution inference profile ARN when `BEDROCK_INFERENCE_PROFILES` maps
 its model id to one, falling back to the bare model id otherwise. If Bedrock
 rejects that ARN as not found, the call retries once with the bare model id,
 and the ARN is skipped for 300 seconds before being tried again.
+
+### Throttling
+
+A throttled call doesn't fail its row. Throttles are Bedrock's
+`ThrottlingException` and, on Vertex and Foundry, 429 (rate limit) and 529
+(overloaded).
+
+- **The row is deferred.** No result is written, so the batch stays `pending`
+  and a later poll fetches the row again. A throttle doesn't use up the row's
+  `RETRY_MAX_ATTEMPTS`.
+- **The model pauses.** Every worker thread stops calling that model for
+  `THROTTLE_PAUSE_MIN_SECONDS`, and each new pause doubles, up to
+  `THROTTLE_PAUSE_MAX_SECONDS`. A burst of throttles grows the pause once. A
+  success resets the next pause to the minimum. Other models aren't paused:
+  rows for other models in the same page keep running. Batches are handled one
+  at a time, though, so a batch waiting on a paused model delays the batches
+  after it.
+- **The turn ends.** After a page with deferred rows, the worker moves on to the
+  next batch instead of fetching the same rows again. When every batch in a
+  pass deferred rows, it waits `POLL_INTERVAL` before polling again.
+- **Old rows fail.** A throttled row fails with `throttled and older than N
+  seconds` once its age plus `THROTTLE_PAUSE_MAX_SECONDS` reaches
+  `THROTTLE_MAX_ROW_AGE_SECONDS`. This keeps a batch from staying pending
+  indefinitely. A deferred row is tried again on its batch's next turn, one
+  pass over pending batches later, so adding the max pause is a heuristic that
+  leaves room for one more pause before the limit, not a bound on when the next
+  attempt comes. ClickHouse measures the age from the row's `created_at`, and
+  the worker adds the time since it fetched the row. A row past the limit still
+  waits out its model's pause and gets one call; it fails only if that call is
+  throttled too. The limit must be greater than `THROTTLE_PAUSE_MAX_SECONDS`.
+- **Late results under sustained throttling.** The worker doesn't know how
+  long the reader of a batch waits for it. Batches are handled one at a time,
+  and each turn on a batch throttled on a paused model waits out the pause, so
+  under sustained throttling a pass can take several pauses. A deferred row can
+  then come back after the reader has stopped waiting, and the reader times out
+  instead of seeing per-row errors.
+
+Other transient errors, such as 5xx responses (including Vertex 503 and 504),
+timeouts and connection errors, are retried up to `RETRY_MAX_ATTEMPTS` and then
+fail the row.
+
+The worker logs `llm_throttle_pause` when a model pauses and `row_deferred` for
+each deferred row. A turn that deferred rows logs `batch_deferred` instead of
+`batch_completed`, and a turn cut short by shutdown logs `batch_interrupted`.
+These logs carry error codes, never prompt or response content.
+
+### Shutdown
+
+On SIGTERM or SIGINT the worker stops starting new provider calls, waits for
+the calls already in flight, writes their results and exits. Rows in the page
+that haven't started, and rows waiting out a throttle pause or a retry backoff,
+are deferred as `stopping`, not failed. They and the batch's remaining pages
+stay `pending` for the next worker.
+
+Each in-flight call can take up to the client timeout (120 seconds) on each of
+the SDK's own attempts: botocore makes 5 attempts by default, and the Anthropic
+SDK retries twice. Size the termination grace period with that in mind. If the
+worker is killed before it finishes, results it hasn't written yet (they are
+written in chunks of 50) are lost, and the next worker processes those rows
+again.
 
 ## Quick start
 
@@ -107,8 +169,8 @@ carrying only that backend's SDK.
 | Variable             | Default   | Description                                                  |
 | -------------------- | --------- | ------------------------------------------------------------ |
 | `LLM_PROVIDER`       | `bedrock` | `bedrock` (AWS), `vertex` (GCP), or `foundry` (Azure)        |
-| `MAX_WORKERS`        | `20`      | Concurrent provider calls                                    |
-| `RETRY_MAX_ATTEMPTS` | `5`       | Max retries per call                                         |
+| `MAX_WORKERS`        | `20`      | Concurrent provider calls; also the Bedrock connection pool size |
+| `RETRY_MAX_ATTEMPTS` | `5`       | Max attempts per call for transient errors; throttles don't count |
 | `RETRY_MAX_BACKOFF`  | `30`      | Max backoff in seconds between retries                       |
 
 Provider-specific settings — only the selected provider's vars are read:
@@ -146,9 +208,12 @@ Model selection is per-request via each input row's `model_id`, not env-configur
 
 | Variable              | Default | Description                                    |
 | --------------------- | ------- | ---------------------------------------------- |
-| `POLL_INTERVAL`       | `10`    | Seconds between polling cycles when idle       |
+| `POLL_INTERVAL`       | `10`    | Seconds between polling cycles when idle or when every batch was throttled |
 | `PENDING_BATCH_LIMIT` | `100`   | Max pending batches to fetch per poll          |
 | `BATCH_PAGE_SIZE`     | `100`   | Input rows fetched per page within a batch     |
+| `THROTTLE_PAUSE_MIN_SECONDS` | `1` | First pause for a throttled model, in seconds |
+| `THROTTLE_PAUSE_MAX_SECONDS` | `60` | Longest pause for a throttled model, in seconds |
+| `THROTTLE_MAX_ROW_AGE_SECONDS` | `600` | A throttled row fails instead of being deferred once its age (seconds since insert) plus `THROTTLE_PAUSE_MAX_SECONDS` reaches this (540s of age with the defaults). Must be greater than `THROTTLE_PAUSE_MAX_SECONDS`; see [Throttling](#throttling) |
 
 ## Testing
 
@@ -191,7 +256,8 @@ regeneration workflow.
 src/llm_worker/
   config.py       -- environment-based configuration + provider selection
   main.py         -- polling loop, batch orchestration, graceful shutdown
-  executor.py     -- provider-agnostic thread pool, retry, and result mapping
+  executor.py     -- provider-agnostic thread pool, retry, throttle deferral, and result mapping
+  throttle.py     -- per-model pause shared by worker threads when a backend throttles
   contract.py     -- MC eval contract v1 types + input normalization
   providers/      -- pluggable LLM backends (bedrock, vertex, foundry)
   clickhouse.py   -- ClickHouse reads/writes for inputs, results, and batch status
