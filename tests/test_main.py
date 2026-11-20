@@ -9,12 +9,13 @@ from clickhouse_connect.driver.exceptions import ClickHouseError
 
 from llm_worker.clickhouse import LLMInput, LLMResult
 from llm_worker.config import BedrockConfig
-from llm_worker.executor import BatchExecutor, Deferred
+from llm_worker.executor import BatchExecutor, Deferred, DeferralReason
 from llm_worker.main import (
     WORKER_INFO_REPUBLISH_SECONDS,
     BatchTurn,
     WORKER_INFO_RETRY_SECONDS,
     LLMWorkerService,
+    TurnStatus,
     WorkerInfo,
     run,
 )
@@ -31,7 +32,13 @@ def _make_service(ch_mock=None, executor_mock=None, poll_interval: float = 1):
     executor = executor_mock or MagicMock()
     if not hasattr(executor, "process_batch_iter"):
         executor.process_batch_iter = MagicMock(return_value=iter(()))
-    return LLMWorkerService(ch, executor, poll_interval, worker_info=WORKER_INFO)
+    return LLMWorkerService(
+        ch,
+        executor,
+        poll_interval,
+        worker_info=WORKER_INFO,
+        stop_event=threading.Event(),
+    )
 
 
 class TestSignalHandling:
@@ -303,7 +310,29 @@ class TestDeferredRows:
         )
         service = _make_service(ch_mock=ch, executor_mock=executor)
 
-        assert service.process_single_batch(BATCH_1) == BatchTurn(deferred_rows=2)
+        assert service.process_single_batch(BATCH_1) == BatchTurn(
+            TurnStatus.DEFERRED, 2
+        )
+
+    def test_page_deferred_by_a_stop_interrupts_the_turn(self):
+        ch = MagicMock()
+        executor = MagicMock()
+        ch.get_batch_rows.side_effect = [[MagicMock()] * 2, []]
+        service = _make_service(ch_mock=ch, executor_mock=executor)
+        stopping = Deferred(
+            BATCH_1, UUID(int=2), "model-1", reason=DeferralReason.STOPPING
+        )
+
+        def page(rows):
+            service.stop()  # SIGTERM arrives while the page runs
+            return iter([self._complete(1), stopping])
+
+        executor.process_batch_iter.side_effect = page
+
+        assert service.process_single_batch(BATCH_1) == BatchTurn(
+            TurnStatus.INTERRUPTED, 1
+        )
+        ch.write_batch_status.assert_not_called()
 
     def test_completed_turn_reports_no_deferred_rows(self):
         ch = MagicMock()
@@ -313,7 +342,7 @@ class TestDeferredRows:
         executor.process_batch_iter.return_value = iter([self._complete(1)])
         service = _make_service(ch_mock=ch, executor_mock=executor)
 
-        assert service.process_single_batch(BATCH_1) == BatchTurn(deferred_rows=0)
+        assert service.process_single_batch(BATCH_1) == BatchTurn(TurnStatus.COMPLETED)
 
 
 class TestIdleWait:
@@ -335,7 +364,9 @@ class TestIdleWait:
     def test_waits_when_every_batch_in_a_pass_deferred(self, mocker):
         ch = MagicMock()
         service, calls = self._service(
-            mocker, ch, [BatchTurn(deferred_rows=1), BatchTurn(deferred_rows=4)]
+            mocker,
+            ch,
+            [BatchTurn(TurnStatus.DEFERRED, 1), BatchTurn(TurnStatus.DEFERRED, 4)],
         )
 
         def poll():
@@ -354,7 +385,9 @@ class TestIdleWait:
     def test_does_not_wait_when_some_batch_progressed(self, mocker):
         ch = MagicMock()
         service, calls = self._service(
-            mocker, ch, [BatchTurn(deferred_rows=1), BatchTurn(deferred_rows=0)]
+            mocker,
+            ch,
+            [BatchTurn(TurnStatus.DEFERRED, 1), BatchTurn(TurnStatus.COMPLETED)],
         )
 
         def poll():
@@ -369,6 +402,23 @@ class TestIdleWait:
         service.run()
 
         assert calls[:2] == [("poll",), ("poll",)]
+
+    def test_waits_when_every_batch_in_a_pass_was_interrupted(self, mocker):
+        ch = MagicMock()
+        service, calls = self._service(mocker, ch, [BatchTurn(TurnStatus.INTERRUPTED)])
+
+        def poll():
+            calls.append(("poll",))
+            if len([c for c in calls if c[0] == "poll"]) > 1:
+                service.stop()
+                return []
+            return [BATCH_1]
+
+        ch.get_pending_batches.side_effect = poll
+
+        service.run()
+
+        assert calls[:3] == [("poll",), ("wait", 7), ("poll",)]
 
     def test_stop_ends_an_idle_wait_promptly(self, mocker):
         ch = MagicMock()
@@ -401,7 +451,9 @@ class TestStopBetweenPages:
 
         executor.process_batch_iter.side_effect = first_page
 
-        assert service.process_single_batch(BATCH_1) == BatchTurn(deferred_rows=0)
+        assert service.process_single_batch(BATCH_1) == BatchTurn(
+            TurnStatus.INTERRUPTED
+        )
         assert ch.get_batch_rows.call_count == 1
         ch.write_results.assert_called_once_with([result])
         ch.write_batch_status.assert_not_called()
@@ -582,7 +634,7 @@ def _service_config(mocker, max_workers=20):
 
 
 class TestRunStartup:
-    def test_run_sizes_the_bedrock_pool_from_max_workers(self, mocker):
+    def test_run_sizes_the_provider_from_max_workers(self, mocker):
         mocker.patch(
             "llm_worker.main.load_config",
             return_value=_service_config(mocker, max_workers=37),
@@ -598,7 +650,7 @@ class TestRunStartup:
 
         run()
 
-        assert create_provider.call_args.args[0].max_pool_connections == 37
+        assert create_provider.call_args.kwargs["max_concurrency"] == 37
 
     def test_run_passes_the_provider_capabilities(self, mocker):
         mocker.patch(
@@ -783,7 +835,13 @@ class TestSigtermDuringThrottlePause:
         gate.on_throttle("model-1", call_started_at=gate.now())
         provider = MagicMock()
         executor = BatchExecutor(
-            provider, 3, 5, 0, throttle_gate=gate, stop_event=stop_event
+            provider,
+            3,
+            5,
+            0,
+            throttle_gate=gate,
+            stop_event=stop_event,
+            max_row_age_seconds=600,
         )
         ch = MagicMock()
         ch.get_pending_batches.return_value = [BATCH_1]

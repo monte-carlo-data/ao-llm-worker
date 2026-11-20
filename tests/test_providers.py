@@ -17,7 +17,6 @@ def test_load_provider_config_default_bedrock(monkeypatch):
     assert cfg.cloud == "aws"
     assert cfg.region == "us-east-1"
     assert cfg.inference_profiles == {}
-    assert cfg.max_pool_connections == 20
 
 
 def test_bedrock_region_from_env(monkeypatch):
@@ -123,8 +122,16 @@ def test_unknown_provider_raises():
 
 # --- create_provider: adapter construction from a resolved config ---
 def test_creates_bedrock_provider():
-    provider = create_provider(load_provider_config("bedrock"))
+    provider = create_provider(load_provider_config("bedrock"), max_concurrency=20)
     assert isinstance(provider, BedrockProvider)
+
+
+def test_bedrock_pool_is_sized_to_max_concurrency(mocker):
+    boto_client = mocker.patch("llm_worker.providers.bedrock.boto3.client")
+
+    create_provider(load_provider_config("bedrock"), max_concurrency=37)
+
+    assert boto_client.call_args.kwargs["config"].max_pool_connections == 37
 
 
 def test_bedrock_path_does_not_import_vertex_module(monkeypatch):
@@ -133,7 +140,7 @@ def test_bedrock_path_does_not_import_vertex_module(monkeypatch):
     # mocker.patch("...vertex.<sym>") re-imports a fresh copy, leaving that patch out
     # of sync with symbols imported from the original module at collection time.
     monkeypatch.delitem(sys.modules, "llm_worker.providers.vertex", raising=False)
-    create_provider(load_provider_config("bedrock"))
+    create_provider(load_provider_config("bedrock"), max_concurrency=20)
     assert "llm_worker.providers.vertex" not in sys.modules
 
 
@@ -144,7 +151,7 @@ def test_vertex_selection_fails_fast_when_sdk_unavailable(monkeypatch):
     monkeypatch.setitem(sys.modules, "llm_worker.providers.vertex", None)
 
     with pytest.raises(RuntimeError, match="gcp image variant"):
-        create_provider(provider_config)
+        create_provider(provider_config, max_concurrency=20)
 
 
 def test_foundry_selection_fails_fast_when_sdk_unavailable(monkeypatch):
@@ -154,7 +161,7 @@ def test_foundry_selection_fails_fast_when_sdk_unavailable(monkeypatch):
     monkeypatch.setitem(sys.modules, "llm_worker.providers.foundry", None)
 
     with pytest.raises(RuntimeError, match="azure image variant"):
-        create_provider(provider_config)
+        create_provider(provider_config, max_concurrency=20)
 
 
 def test_creates_foundry_provider(monkeypatch, mocker):
@@ -166,7 +173,7 @@ def test_creates_foundry_provider(monkeypatch, mocker):
     )
     from llm_worker.providers.foundry import FoundryProvider
 
-    provider = create_provider(load_provider_config("foundry"))
+    provider = create_provider(load_provider_config("foundry"), max_concurrency=20)
     assert isinstance(provider, FoundryProvider)
 
 
@@ -179,5 +186,5 @@ def test_creates_vertex_provider(monkeypatch, mocker):
     )
     from llm_worker.providers.vertex import VertexProvider
 
-    provider = create_provider(load_provider_config("vertex"))
+    provider = create_provider(load_provider_config("vertex"), max_concurrency=20)
     assert isinstance(provider, VertexProvider)

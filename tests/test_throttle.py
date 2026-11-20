@@ -123,32 +123,6 @@ class TestPerModel:
         assert gate.on_throttle("b", call_started_at=clock.now) == 1.0
 
 
-class TestIsPaused:
-    def test_paused_after_a_throttle(self):
-        gate, clock = _gate()
-        gate.on_throttle("m", call_started_at=clock.now)
-
-        assert gate.is_paused("m") is True
-
-    def test_not_paused_once_the_pause_elapses(self):
-        gate, clock = _gate()
-        gate.on_throttle("m", call_started_at=clock.now)
-        clock.advance(1.0)
-
-        assert gate.is_paused("m") is False
-
-    def test_not_paused_for_an_unknown_model(self):
-        gate, _ = _gate()
-
-        assert gate.is_paused("never-throttled") is False
-
-    def test_pause_on_one_model_does_not_pause_another(self):
-        gate, clock = _gate()
-        gate.on_throttle("a", call_started_at=clock.now)
-
-        assert gate.is_paused("b") is False
-
-
 class TestMaxPause:
     def test_exposes_the_configured_max(self):
         assert ThrottleGate(1.0, 8.0).max_pause == 8.0
@@ -184,18 +158,34 @@ class TestWait:
         stop = threading.Event()
         results = []
 
-        threads = [
-            threading.Thread(target=lambda: results.append(gate.wait("m", stop)))
-            for _ in range(5)
-        ]
+        entered = threading.Semaphore(0)
+
+        def wait():
+            entered.release()
+            results.append(gate.wait("m", stop))
+
+        threads = [threading.Thread(target=wait) for _ in range(5)]
         for t in threads:
             t.start()
+        for _ in threads:
+            assert entered.acquire(timeout=1)
+        time.sleep(0.05)  # every thread is now blocked in the pause
         stop.set()
         for t in threads:
             t.join(timeout=1)
 
         assert not any(t.is_alive() for t in threads)
         assert results == [False] * 5
+
+    def test_any_wake_event_ends_the_wait(self):
+        gate = ThrottleGate(30.0, 30.0)
+        gate.on_throttle("m", call_started_at=gate.now())
+        stop, abort = threading.Event(), threading.Event()
+        threading.Timer(0.05, abort.set).start()
+        started = time.monotonic()
+
+        assert gate.wait("m", stop, abort) is False
+        assert time.monotonic() - started < 1
 
 
 class TestValidation:

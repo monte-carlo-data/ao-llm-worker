@@ -24,6 +24,9 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
+# How often wait() rechecks its events when it watches more than one.
+_MULTI_EVENT_WAIT_SLICE_SECONDS = 0.05
+
 
 @dataclass
 class _ModelState:
@@ -58,27 +61,27 @@ class ThrottleGate:
         """The longest a single pause can last, in seconds."""
         return self._max_pause
 
-    def is_paused(self, model_id: str) -> bool:
-        """True while ``model_id`` is inside a pause."""
-        with self._lock:
-            state = self._models.get(model_id)
-            return state is not None and self._clock() < state.paused_until
-
-    def wait(self, model_id: str, stop_event: threading.Event) -> bool:
+    def wait(self, model_id: str, *wake_events: threading.Event) -> bool:
         """Block until ``model_id`` isn't paused.
 
-        Returns True when the caller may proceed, or False if ``stop_event`` was
-        set while waiting. Re-checks after each wake, because another thread may
-        have started a new pause in the meantime.
+        Returns True when the caller may proceed, or False if any of
+        ``wake_events`` was set while waiting. Re-checks after each wake, because
+        another thread may have started a new pause in the meantime.
         """
         while True:
+            if any(event.is_set() for event in wake_events):
+                return False
             with self._lock:
                 state = self._models.get(model_id)
                 remaining = state.paused_until - self._clock() if state else 0.0
             if remaining <= 0:
                 return True
-            if stop_event.wait(remaining):
-                return False
+            if len(wake_events) == 1:
+                if wake_events[0].wait(remaining):
+                    return False
+            else:
+                # An Event can't wait on another, so poll several in slices.
+                time.sleep(min(remaining, _MULTI_EVENT_WAIT_SLICE_SECONDS))
 
     def on_throttle(self, model_id: str, call_started_at: float) -> float | None:
         """Report a throttled call. Returns the new pause in seconds, or None

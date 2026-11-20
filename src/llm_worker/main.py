@@ -6,7 +6,8 @@ import signal
 import threading
 import time
 from collections.abc import Iterable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
+from enum import Enum
 from types import FrameType
 from uuid import UUID
 
@@ -19,7 +20,7 @@ from tenacity import (
 )
 
 from llm_worker.clickhouse import ClickHouseClient, LLMResult
-from llm_worker.config import BedrockConfig, load_config
+from llm_worker.config import load_config
 from llm_worker.executor import BatchExecutor, Deferred, RowOutcome
 from llm_worker.providers import create_provider, load_provider_config
 from llm_worker.logging_setup import configure_logging
@@ -39,14 +40,27 @@ WORKER_INFO_REPUBLISH_SECONDS = 600
 WORKER_INFO_RETRY_SECONDS = 30
 
 
+class TurnStatus(Enum):
+    """How a turn on a batch ended."""
+
+    # Every row has a result and the batch is marked complete.
+    COMPLETED = "completed"
+    # The backend throttled some rows; the batch stays pending for a later turn.
+    DEFERRED = "deferred"
+    # The worker is stopping; the batch stays pending for the next worker.
+    INTERRUPTED = "interrupted"
+
+
 @dataclass(frozen=True)
 class BatchTurn:
     """What one turn on a batch did, for the caller's scheduling.
 
-    ``deferred_rows`` counts rows left without a result (throttled, or the
-    worker stopped); the batch stays pending and a later turn retries them.
+    ``deferred_rows`` counts rows left without a result in this turn (throttled,
+    or the worker stopped); the batch stays pending and a later turn retries
+    them.
     """
 
+    status: TurnStatus
     deferred_rows: int = 0
 
 
@@ -67,14 +81,14 @@ class LLMWorkerService:
         poll_interval: float,
         *,
         worker_info: WorkerInfo,
-        stop_event: threading.Event | None = None,
+        stop_event: threading.Event,
     ):
         self._ch = ch
         self._executor = executor
         self._poll_interval = poll_interval
         # Set on SIGTERM/SIGINT or stop(). An Event rather than a bool so threads
         # waiting out a throttle pause can share it and wake up promptly.
-        self._stop_event = stop_event or threading.Event()
+        self._stop_event = stop_event
         self._worker_info = worker_info
         self._worker_info_next_at: float | None = None
 
@@ -93,7 +107,8 @@ class LLMWorkerService:
                 for batch_id in self._ch.get_pending_batches():
                     if self._should_stop:
                         break
-                    if self.process_single_batch(batch_id).deferred_rows == 0:
+                    turn = self.process_single_batch(batch_id)
+                    if turn.status is TurnStatus.COMPLETED:
                         progressed = True
                 # Wait when there was nothing to do, or when every batch only
                 # deferred rows: polling again at once would refetch rows the
@@ -119,7 +134,7 @@ class LLMWorkerService:
         worker doesn't publish.
         """
         # After a rollback, the replacement worker's startup row must stay the
-        # newest, so a worker finishing its batch during shutdown doesn't write.
+        # newest, so a worker finishing its page during shutdown doesn't write.
         if self._should_stop:
             return
         now = time.monotonic()
@@ -142,8 +157,7 @@ class LLMWorkerService:
             # A stopping worker doesn't start another page. The batch keeps its
             # remaining rows and stays pending for the next worker.
             if self._should_stop:
-                logger.info("batch_interrupted", extra={"batch_id": str(batch_id)})
-                return BatchTurn(deferred_rows)
+                return self._interrupted(batch_id, deferred_rows)
 
             rows = self._ch.get_batch_rows(batch_id)
             if not rows:
@@ -167,6 +181,10 @@ class LLMWorkerService:
                 break
 
         if deferred_rows:
+            # Rows deferred because the worker is stopping, possibly alongside
+            # throttled ones: the batch is left for the next worker.
+            if self._should_stop:
+                return self._interrupted(batch_id, deferred_rows)
             total_rows, total_completed, total_failed = self._ch.get_batch_counts(
                 batch_id
             )
@@ -179,7 +197,7 @@ class LLMWorkerService:
                     "failed": total_failed,
                 },
             )
-            return BatchTurn(deferred_rows)
+            return BatchTurn(TurnStatus.DEFERRED, deferred_rows)
 
         if not saw_rows:
             total_rows, total_completed, total_failed = self._ch.get_batch_counts(
@@ -216,7 +234,15 @@ class LLMWorkerService:
             "batch_status_written",
             extra={"batch_id": str(batch_id), "status": "complete"},
         )
-        return BatchTurn()
+        return BatchTurn(TurnStatus.COMPLETED)
+
+    @staticmethod
+    def _interrupted(batch_id: UUID, deferred_rows: int) -> BatchTurn:
+        logger.info(
+            "batch_interrupted",
+            extra={"batch_id": str(batch_id), "deferred_rows": deferred_rows},
+        )
+        return BatchTurn(TurnStatus.INTERRUPTED, deferred_rows)
 
     def _write_results_in_chunks(self, results: Iterable[RowOutcome]) -> int:
         """Write results in chunks and return how many rows were deferred."""
@@ -305,17 +331,12 @@ class LLMWorkerService:
 def run():
     config = load_config()
     provider_config = load_provider_config(os.environ.get("LLM_PROVIDER", "bedrock"))
-    if isinstance(provider_config, BedrockConfig):
-        # The connection pool matches the worker thread count.
-        provider_config = replace(
-            provider_config, max_pool_connections=config.max_workers
-        )
     ch = ClickHouseClient(
         config.clickhouse,
         pending_batch_limit=config.pending_batch_limit,
         batch_page_size=config.batch_page_size,
     )
-    provider = create_provider(provider_config)
+    provider = create_provider(provider_config, max_concurrency=config.max_workers)
     # One stop signal for the whole worker: the service sets it on SIGTERM/SIGINT.
     stop_event = threading.Event()
     executor = BatchExecutor(

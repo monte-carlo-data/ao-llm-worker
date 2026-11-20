@@ -29,7 +29,7 @@ from botocore.exceptions import (
     ReadTimeoutError,
 )
 
-from llm_worker.config import BedrockConfig
+from llm_worker.config import DEFAULT_MAX_WORKERS, BedrockConfig
 from llm_worker.contract import ContractRequest, resolve_model_ref
 from llm_worker.providers.base import (
     ErrorDisposition,
@@ -100,14 +100,21 @@ def _is_retryable(exc: BaseException) -> bool:
 class BedrockProvider(LLMProvider):
     capabilities = ("output_format", "thinking", "effort")
 
-    def __init__(self, config: BedrockConfig, boto_client=None):
+    def __init__(
+        self,
+        config: BedrockConfig,
+        boto_client=None,
+        *,
+        max_pool_connections: int = DEFAULT_MAX_WORKERS,
+    ):
         super().__init__()
         self._client = boto_client or boto3.client(
             "bedrock-runtime",
             region_name=config.region,
             config=Config(
                 read_timeout=BEDROCK_READ_TIMEOUT_SECONDS,
-                max_pool_connections=config.max_pool_connections,
+                # One connection per worker thread; botocore's default is 10.
+                max_pool_connections=max_pool_connections,
             ),
         )
         self._inference_profiles = config.inference_profiles

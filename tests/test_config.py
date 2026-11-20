@@ -41,6 +41,16 @@ def test_throttle_pause_max_below_min_raises(monkeypatch):
         load_config()
 
 
+@pytest.mark.parametrize("max_row_age", ["30", "20"])
+def test_throttle_max_row_age_not_above_pause_max_raises(monkeypatch, max_row_age):
+    # A row throttled once would always fail: its age plus the max pause would
+    # already reach the limit.
+    monkeypatch.setenv("THROTTLE_PAUSE_MAX_SECONDS", "30")
+    monkeypatch.setenv("THROTTLE_MAX_ROW_AGE_SECONDS", max_row_age)
+    with pytest.raises(ValueError, match="THROTTLE_MAX_ROW_AGE_SECONDS"):
+        load_config()
+
+
 def test_load_config_from_env(monkeypatch):
     monkeypatch.setenv("CH_HOST", "ch.example.com")
     monkeypatch.setenv("CH_PORT", "9000")
