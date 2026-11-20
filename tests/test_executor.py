@@ -552,20 +552,26 @@ class TestThrottle:
         assert result.error == "Batch aborted"
 
     def test_stopping_during_a_pause_defers_without_calling(self):
-        gate = ThrottleGate(30.0, 30.0)
+        gate = _EnteringGate(30.0, 30.0)
         gate.on_throttle("model-1", call_started_at=gate.now())
         stop_event = threading.Event()
-        stop_event.set()
         provider = FakeProvider()
-
-        started = time.monotonic()
-        result = _executor(provider, throttle_gate=gate, stop_event=stop_event).invoke(
-            _make_input()
+        executor = _executor(provider, throttle_gate=gate, stop_event=stop_event)
+        results = []
+        worker = threading.Thread(
+            target=lambda: results.append(executor.invoke(_make_input()))
         )
 
-        assert result == Deferred(BATCH_1, ROW_1, "model-1")
+        worker.start()
+        assert gate.entered.wait(timeout=1)
+        time.sleep(0.05)  # the row is now blocked in the pause
+        stop_event.set()
+        worker.join(timeout=1)
+
+        assert not worker.is_alive()
+        assert results == [Deferred(BATCH_1, ROW_1, "model-1")]
+        assert results[0].reason is DeferralReason.STOPPING
         assert provider.calls == 0
-        assert time.monotonic() - started < 1
 
     def test_stopping_cuts_a_retry_backoff_short(self):
         stop_event = threading.Event()
@@ -664,6 +670,40 @@ class TestThrottle:
         assert result.reason is DeferralReason.THROTTLED
         assert result.error_code == "TooManyRequests"
 
+    def test_row_stopped_after_an_abort_stays_deferred(self):
+        stop_event = threading.Event()
+
+        def fail_or_abort(request):
+            if request.prompt == "retrying":
+                raise _Retryable("transient")  # then sits in a retry backoff
+            time.sleep(0.05)
+            raise _Auth("bad credentials")
+
+        row_1, row_2 = UUID(int=1), UUID(int=2)
+        inputs = [
+            _make_input(row_id=row_1, prompt="retrying"),
+            _make_input(row_id=row_2, prompt="aborting"),
+        ]
+        executor = _executor(
+            FakeProvider(fail_or_abort),
+            max_workers=2,
+            retry_max_attempts=3,
+            retry_max_backoff=30,
+            stop_event=stop_event,
+        )
+        # SIGTERM arrives after the abort, while row 1 is still in its backoff,
+        # so row 1's outcome reaches the loop that drains in-flight rows.
+        threading.Timer(0.3, stop_event.set).start()
+
+        outcomes = executor.process_batch(inputs)
+
+        by_row = {o.row_id: o for o in outcomes}
+        assert len(outcomes) == 2
+        # A row left behind by a stopping worker isn't written as aborted.
+        assert isinstance(by_row[row_1], Deferred)
+        assert by_row[row_1].reason is DeferralReason.STOPPING
+        assert by_row[row_2].error == "bad credentials"
+
     def test_batch_yields_each_row_once_with_deferrals(self):
         def throttle_odd_rows(request):
             if request.prompt.endswith(("1", "3")):
@@ -701,17 +741,28 @@ class TestThrottleRowAge:
 
         assert result == Deferred(BATCH_1, ROW_1, "model-1")
 
-    def test_row_at_the_limit_fails(self):
+    def test_row_whose_age_plus_max_pause_reaches_the_limit_fails(self):
+        # A fixed clock keeps the row's age exact: 590 + 10 == 600.
+        gate = ThrottleGate(10.0, 10.0, clock=_FakeClock())
         executor = _executor(
-            FakeProvider(self._always_throttled),
-            max_workers=1,
-            throttle_gate=ThrottleGate(0.01, 0.01),
+            FakeProvider(self._always_throttled), max_workers=1, throttle_gate=gate
         )
 
-        result = executor.invoke(_make_input(age_seconds=600))
+        result = executor.invoke(_make_input(age_seconds=590))
 
         assert result.status == "failed"
         assert result.error == "throttled and older than 600 seconds"
+
+    def test_row_just_under_the_limit_is_deferred(self):
+        # 589 + 10 == 599, one second short of the limit.
+        gate = ThrottleGate(10.0, 10.0, clock=_FakeClock())
+        executor = _executor(
+            FakeProvider(self._always_throttled), max_workers=1, throttle_gate=gate
+        )
+
+        result = executor.invoke(_make_input(age_seconds=589))
+
+        assert result == Deferred(BATCH_1, ROW_1, "model-1")
 
     def test_age_limit_only_applies_to_throttles(self):
         def always(*a):
@@ -724,6 +775,18 @@ class TestThrottleRowAge:
         result = executor.invoke(_make_input(age_seconds=10_000))
 
         assert result.error == "bad request"
+
+
+class _EnteringGate(ThrottleGate):
+    """A gate that signals when a caller starts waiting."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.entered = threading.Event()
+
+    def wait(self, model_id, *wake_events):
+        self.entered.set()
+        return super().wait(model_id, *wake_events)
 
 
 class _FakeClock:
@@ -758,6 +821,31 @@ class TestThrottleRowAgeIsCurrent:
 
         assert result.status == "failed"
         assert result.error == "throttled and older than 600 seconds"
+
+    def test_row_age_includes_time_behind_other_rows_in_the_page(self):
+        clock = _FakeClock()
+        gate = ThrottleGate(1.0, 1.0, clock=clock)
+
+        def slow_then_throttle(request):
+            if request.prompt == "first":
+                clock.advance(20)  # the second row waits behind this call
+                return LLMResponse({"output_text": "ok"}, 0, 0)
+            raise _Throttled("slow down")
+
+        inputs = [
+            _make_input(row_id=UUID(int=1), prompt="first"),
+            _make_input(row_id=UUID(int=2), prompt="second", age_seconds=590),
+        ]
+        executor = _executor(
+            FakeProvider(slow_then_throttle), max_workers=1, throttle_gate=gate
+        )
+
+        outcomes = executor.process_batch(inputs)
+
+        by_row = {o.row_id: o for o in outcomes}
+        # 590 at fetch, plus 20 held, plus the 1s max pause, reaches 600.
+        assert by_row[UUID(int=2)].status == "failed"
+        assert by_row[UUID(int=2)].error == "throttled and older than 600 seconds"
 
     def test_row_near_the_limit_fails_instead_of_deferring(self):
         executor = _executor(

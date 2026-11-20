@@ -158,12 +158,18 @@ class TestWait:
         stop = threading.Event()
         results = []
 
-        threads = [
-            threading.Thread(target=lambda: results.append(gate.wait("m", stop)))
-            for _ in range(5)
-        ]
+        entered = threading.Semaphore(0)
+
+        def wait():
+            entered.release()
+            results.append(gate.wait("m", stop))
+
+        threads = [threading.Thread(target=wait) for _ in range(5)]
         for t in threads:
             t.start()
+        for _ in threads:
+            assert entered.acquire(timeout=1)
+        time.sleep(0.05)  # every thread is now blocked in the pause
         stop.set()
         for t in threads:
             t.join(timeout=1)
