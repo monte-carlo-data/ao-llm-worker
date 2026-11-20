@@ -11,7 +11,6 @@ from types import SimpleNamespace
 
 import anthropic
 import httpx
-from anthropic import _exceptions as anthropic_exceptions
 import pytest
 
 from llm_worker.config import FoundryConfig, VertexConfig
@@ -217,6 +216,19 @@ class TestTemperatureFallback:
         assert client.messages.create.call_count == 1
 
 
+def _sdk_status_error(client, status):
+    """The error the SDK client itself raises for an HTTP status."""
+    if client == "vertex":
+        sdk = anthropic.AnthropicVertex(
+            region="us-east5", project_id="p", access_token="t"
+        )
+    else:
+        sdk = anthropic.Anthropic(api_key="k")
+    request = httpx.Request("POST", "https://anthropic.example.com")
+    response = httpx.Response(status, request=request)
+    return sdk._make_status_error("err", body=None, response=response)
+
+
 class TestErrorCode:
     def test_uses_exception_class_name(self, backend, mocker):
         provider = backend.make(mocker.Mock())
@@ -246,21 +258,24 @@ class TestClassifyError:
             == ErrorDisposition.RETRY
         )
 
-    # The Vertex client maps 503 and 504 to these classes, which are not
-    # InternalServerError subclasses.
+    # Errors as the real SDK clients build them from a status code. The Vertex
+    # client maps 503 and 504 to classes outside InternalServerError, and 529 to
+    # InternalServerError; the base client (used by Foundry) maps 529 to
+    # OverloadedError.
+    @pytest.mark.parametrize("client", ["vertex", "base"])
     @pytest.mark.parametrize(
-        ("cls", "status"),
+        ("status", "disposition"),
         [
-            (anthropic_exceptions.ServiceUnavailableError, 503),
-            (anthropic_exceptions.DeadlineExceededError, 504),
+            (429, ErrorDisposition.THROTTLED),
+            (529, ErrorDisposition.THROTTLED),
+            (500, ErrorDisposition.RETRY),
+            (503, ErrorDisposition.RETRY),
+            (504, ErrorDisposition.RETRY),
         ],
     )
-    def test_vertex_unavailable_and_deadline_retry(self, backend, mocker, cls, status):
+    def test_sdk_status_errors(self, backend, mocker, client, status, disposition):
         provider = backend.make(mocker.Mock())
-        assert (
-            provider.classify_error(_status_error(cls, status))
-            == ErrorDisposition.RETRY
-        )
+        assert provider.classify_error(_sdk_status_error(client, status)) == disposition
 
     def test_timeout_retries(self, backend, mocker):
         provider = backend.make(mocker.Mock())
