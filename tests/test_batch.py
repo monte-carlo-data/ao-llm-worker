@@ -7,7 +7,7 @@ from botocore.exceptions import ClientError
 
 from llm_worker.config import BedrockConfig
 from llm_worker.executor import BatchExecutor
-from llm_worker.main import BatchTurn, LLMWorkerService, WorkerInfo
+from llm_worker.main import BatchTurn, LLMWorkerService, TurnStatus, WorkerInfo
 from llm_worker.providers.bedrock import BedrockProvider
 from llm_worker.throttle import ThrottleGate
 
@@ -289,14 +289,16 @@ class TestThrottledBatches:
         service = _make_service(ch_client, mock_boto)
 
         # Throttled: nothing is written and the batch is still pending.
-        assert service.process_single_batch(BATCH_1) == BatchTurn(deferred_rows=2)
+        assert service.process_single_batch(BATCH_1) == BatchTurn(
+            TurnStatus.DEFERRED, 2
+        )
         assert _get_results(ch_client, BATCH_1) == []
         assert BATCH_1 in ch_client.get_pending_batches()
 
         # The backend recovers: the next turn completes every row.
         throttled = False
         time.sleep(0.05)  # past the short pause
-        assert service.process_single_batch(BATCH_1) == BatchTurn(deferred_rows=0)
+        assert service.process_single_batch(BATCH_1) == BatchTurn(TurnStatus.COMPLETED)
 
         results = _get_results(ch_client, BATCH_1)
         assert [r[3] for r in results] == ["complete", "complete"]
@@ -309,7 +311,7 @@ class TestThrottledBatches:
         mock_boto.converse.side_effect = _throttling_error()
         service = _make_service(ch_client, mock_boto, max_row_age_seconds=600)
 
-        assert service.process_single_batch(BATCH_1) == BatchTurn(deferred_rows=0)
+        assert service.process_single_batch(BATCH_1) == BatchTurn(TurnStatus.COMPLETED)
 
         results = _get_results(ch_client, BATCH_1)
         assert len(results) == 1

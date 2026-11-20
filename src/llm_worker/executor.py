@@ -14,6 +14,7 @@ import threading
 from collections.abc import Iterator
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
+from enum import Enum
 from uuid import UUID
 
 from tenacity import (
@@ -45,6 +46,13 @@ class _Aborted(Exception):
     """Raised inside a call attempt when another row has aborted the batch."""
 
 
+class DeferralReason(Enum):
+    """Why a row was left without a result."""
+
+    THROTTLED = "throttled"
+    STOPPING = "stopping"
+
+
 @dataclass(frozen=True)
 class Deferred:
     """A row left without a result, because the backend throttled it or the
@@ -54,11 +62,9 @@ class Deferred:
     batch_id: UUID
     row_id: UUID
     model_id: str
-    # Why the row was deferred; "stopping" when the worker is shutting down.
-    reason: str = field(default="throttled", compare=False)
-
-
-_STOPPING = "stopping"
+    reason: DeferralReason = field(default=DeferralReason.THROTTLED, compare=False)
+    # The provider's error code for a throttle; empty when stopping.
+    error_code: str = field(default="", compare=False)
 
 
 # What the executor yields for each row: a result to write, or a deferral.
@@ -165,19 +171,26 @@ class BatchExecutor:
         raise RuntimeError("Retrying exhausted without result")
 
     @staticmethod
-    def _deferred(input_row: LLMInput, reason: str) -> Deferred:
+    def _deferred(
+        input_row: LLMInput, reason: DeferralReason, error_code: str = ""
+    ) -> Deferred:
         logger.info(
             "row_deferred",
             extra={
                 "row_id": str(input_row.row_id),
                 "batch_id": str(input_row.batch_id),
                 "model_id": input_row.model_id,
-                "reason": reason,
+                "reason": reason.value,
+                "error_code": error_code,
                 "age_seconds": input_row.age_seconds,
             },
         )
         return Deferred(
-            input_row.batch_id, input_row.row_id, input_row.model_id, reason=reason
+            input_row.batch_id,
+            input_row.row_id,
+            input_row.model_id,
+            reason=reason,
+            error_code=error_code,
         )
 
     @staticmethod
@@ -290,7 +303,7 @@ class BatchExecutor:
             )
         except _Stopped:
             # Stopping (during a pause or a retry backoff): defer, don't fail.
-            return self._deferred(input_row, reason=_STOPPING)
+            return self._deferred(input_row, DeferralReason.STOPPING)
         except _Aborted:
             return self._aborted_result(input_row)
         except Exception as e:
@@ -304,7 +317,9 @@ class BatchExecutor:
                     return self._too_old_result(
                         input_row, self._provider.error_code(e), age
                     )
-                return self._deferred(input_row, reason=self._provider.error_code(e))
+                return self._deferred(
+                    input_row, DeferralReason.THROTTLED, self._provider.error_code(e)
+                )
             if disposition == ErrorDisposition.ABORT_BATCH and abort_event:
                 logger.error(
                     "batch_aborted",
@@ -417,7 +432,7 @@ class BatchExecutor:
         for outcome in deferred:
             # An aborted batch completes this turn, so the abort wins over a
             # deferral, except for rows left behind because the worker is stopping.
-            if abort_event.is_set() and outcome.reason != _STOPPING:
+            if abort_event.is_set() and outcome.reason is not DeferralReason.STOPPING:
                 yield self._aborted_result(rows_by_id[outcome.row_id])
             else:
                 yield outcome

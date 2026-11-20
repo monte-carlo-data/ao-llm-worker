@@ -7,7 +7,7 @@ from botocore.exceptions import ClientError
 
 from llm_worker.clickhouse import LLMInput
 from llm_worker.config import BedrockConfig
-from llm_worker.executor import BatchExecutor, Deferred
+from llm_worker.executor import BatchExecutor, Deferred, DeferralReason
 from llm_worker.providers.base import ErrorDisposition, LLMProvider, LLMResponse
 from llm_worker.providers.bedrock import BedrockProvider
 from llm_worker.throttle import ThrottleGate
@@ -650,6 +650,19 @@ class TestThrottle:
 
         assert result.error == "Batch aborted"
         assert provider.calls == 0
+
+    def test_throttled_deferral_carries_reason_and_error_code(self):
+        def always(*a):
+            raise _Throttled("slow down")
+
+        provider = FakeProvider(always)
+        provider.error_code = lambda exc: "TooManyRequests"
+
+        result = _executor(provider).invoke(_make_input())
+
+        assert isinstance(result, Deferred)
+        assert result.reason is DeferralReason.THROTTLED
+        assert result.error_code == "TooManyRequests"
 
     def test_batch_yields_each_row_once_with_deferrals(self):
         def throttle_odd_rows(request):
