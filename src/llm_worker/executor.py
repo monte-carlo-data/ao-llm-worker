@@ -46,6 +46,10 @@ class _Stopped(Exception):
     """Raised inside a call attempt when the worker is stopping."""
 
 
+class _Aborted(Exception):
+    """Raised inside a call attempt when another row has aborted the batch."""
+
+
 @dataclass(frozen=True)
 class Deferred:
     """A row left without a result, because the backend throttled it or the
@@ -96,15 +100,22 @@ class BatchExecutor:
     def _interruptible_sleep(self, seconds: float) -> None:
         self._stop_event.wait(seconds)
 
-    def _call_through_gate(self, request: ContractRequest):
+    def _call_through_gate(
+        self, request: ContractRequest, abort_event: threading.Event | None
+    ):
         """One call attempt: wait out the model's pause, call the provider, and
         report the outcome to the gate."""
         model_id = request.model_id
-        # A stopping worker starts no new calls; the row is left for the next one.
-        if self._stop_event.is_set():
-            raise _Stopped()
-        if not self._gate.wait(model_id, self._stop_event):
-            raise _Stopped()
+        # A stopping worker starts no new calls, leaving the row for the next
+        # one, and an aborted batch makes no more calls. Either one also wakes a
+        # row waiting out a pause.
+        wake_events = [self._stop_event]
+        if abort_event is not None:
+            wake_events.append(abort_event)
+        if not self._gate.wait(model_id, *wake_events):
+            if self._stop_event.is_set():
+                raise _Stopped()
+            raise _Aborted()
         started_at = self._gate.now()
         try:
             response = self._provider.complete(request)
@@ -124,13 +135,15 @@ class BatchExecutor:
         self._gate.on_success(model_id, started_at)
         return response
 
-    def _complete_with_retry(self, request: ContractRequest):
+    def _complete_with_retry(
+        self, request: ContractRequest, abort_event: threading.Event | None
+    ):
         retrying = Retrying(
             # Throttles are not retried here: they defer the row instead, so they
             # never use up its retry budget.
             retry=retry_if_exception(
                 lambda exc: (
-                    not isinstance(exc, _Stopped)
+                    not isinstance(exc, (_Stopped, _Aborted))
                     and self._provider.classify_error(exc) == ErrorDisposition.RETRY
                 )
             ),
@@ -152,7 +165,7 @@ class BatchExecutor:
         )
         for attempt in retrying:
             with attempt:
-                return self._call_through_gate(request)
+                return self._call_through_gate(request, abort_event)
         raise RuntimeError("Retrying exhausted without result")
 
     @staticmethod
@@ -261,7 +274,7 @@ class BatchExecutor:
             )
 
         try:
-            response = self._complete_with_retry(request)
+            response = self._complete_with_retry(request, abort_event)
             logger.info(
                 "row_complete",
                 extra={
@@ -282,6 +295,8 @@ class BatchExecutor:
         except _Stopped:
             # Stopping (during a pause or a retry backoff): defer, don't fail.
             return self._deferred(input_row, reason=_STOPPING)
+        except _Aborted:
+            return self._aborted_result(input_row)
         except Exception as e:
             disposition = self._provider.classify_error(e)
             if disposition == ErrorDisposition.THROTTLED:
@@ -373,12 +388,23 @@ class BatchExecutor:
             for future in in_flight:
                 future.cancel()
 
+            draining: set[Future[RowOutcome]] = set()
             for future, row in in_flight.items():
                 if future.cancelled():
                     # Submitted but never started before the abort — report it aborted
                     # (via aborted_rows below) instead of dropping it silently.
                     aborted_rows.append(row)
                 else:
+                    draining.add(future)
+
+            # Timed waits, like the loop above, so a signal is handled promptly.
+            while draining:
+                done, draining = wait(
+                    draining,
+                    timeout=_FUTURES_WAIT_SLICE_SECONDS,
+                    return_when=FIRST_COMPLETED,
+                )
+                for future in done:
                     outcome = future.result()
                     if isinstance(outcome, Deferred):
                         deferred.append(outcome)

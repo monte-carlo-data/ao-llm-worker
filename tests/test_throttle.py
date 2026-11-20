@@ -171,6 +171,16 @@ class TestWait:
         assert not any(t.is_alive() for t in threads)
         assert results == [False] * 5
 
+    def test_any_wake_event_ends_the_wait(self):
+        gate = ThrottleGate(30.0, 30.0)
+        gate.on_throttle("m", call_started_at=gate.now())
+        stop, abort = threading.Event(), threading.Event()
+        threading.Timer(0.05, abort.set).start()
+        started = time.monotonic()
+
+        assert gate.wait("m", stop, abort) is False
+        assert time.monotonic() - started < 1
+
 
 class TestValidation:
     @pytest.mark.parametrize(("min_pause", "max_pause"), [(0, 1), (-1, 1), (2, 1)])

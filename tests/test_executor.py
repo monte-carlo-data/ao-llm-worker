@@ -595,6 +595,48 @@ class TestThrottle:
         assert by_row[row_2].status == "failed"
         assert by_row[row_2].error == "bad credentials"
 
+    def test_abort_during_a_pause_wakes_waiting_rows_without_a_call(self):
+        gate = ThrottleGate(3.0, 3.0)
+        gate.on_throttle("model-1", call_started_at=gate.now())
+        called_models = []
+
+        def auth_fail_on_model_2(request):
+            called_models.append(request.model_id)
+            time.sleep(0.1)  # let the model-1 rows reach the pause first
+            raise _Auth("bad credentials")
+
+        inputs = [
+            _make_input(row_id=UUID(int=1), model_id="model-1"),
+            _make_input(row_id=UUID(int=2), model_id="model-1"),
+            _make_input(row_id=UUID(int=3), model_id="model-2"),
+        ]
+
+        started = time.monotonic()
+        outcomes = _executor(
+            FakeProvider(auth_fail_on_model_2), throttle_gate=gate
+        ).process_batch(inputs)
+
+        by_row = {o.row_id: o for o in outcomes}
+        assert time.monotonic() - started < 1
+        assert called_models == ["model-2"]
+        assert by_row[UUID(int=1)].error == "Batch aborted"
+        assert by_row[UUID(int=2)].error == "Batch aborted"
+        assert by_row[UUID(int=3)].error == "bad credentials"
+
+    def test_row_aborted_while_waiting_is_not_called(self):
+        gate = ThrottleGate(0.2, 0.2)
+        gate.on_throttle("model-1", call_started_at=gate.now())
+        abort_event = threading.Event()
+        threading.Timer(0.05, abort_event.set).start()
+        provider = FakeProvider()
+
+        result = _executor(provider, throttle_gate=gate).invoke(
+            _make_input(), abort_event=abort_event
+        )
+
+        assert result.error == "Batch aborted"
+        assert provider.calls == 0
+
     def test_batch_yields_each_row_once_with_deferrals(self):
         def throttle_odd_rows(request):
             if request.prompt.endswith(("1", "3")):
