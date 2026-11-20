@@ -499,7 +499,6 @@ class TestThrottle:
         gate = mocker.Mock(spec=ThrottleGate)
         gate.wait.return_value = True
         gate.now.return_value = 5.0
-        gate.is_paused.return_value = False
         gate.max_pause = 0.0
 
         _executor(FakeProvider(), throttle_gate=gate).invoke(_make_input())
@@ -513,7 +512,6 @@ class TestThrottle:
         gate = mocker.Mock(spec=ThrottleGate)
         gate.wait.return_value = True
         gate.now.return_value = 0.0
-        gate.is_paused.return_value = False
         gate.max_pause = 0.0
 
         result = _executor(
@@ -723,8 +721,8 @@ class TestThrottleRowAgeIsCurrent:
         assert result.status == "failed"
         assert result.error == "throttled and older than 600 seconds"
 
-    def test_old_row_does_not_wait_out_a_pause(self):
-        gate = ThrottleGate(2.0, 2.0)
+    def test_old_row_waits_out_a_pause_and_gets_a_call(self):
+        gate = ThrottleGate(0.2, 0.2)
         gate.on_throttle("model-1", call_started_at=gate.now())
         provider = FakeProvider()
         executor = BatchExecutor(
@@ -733,11 +731,57 @@ class TestThrottleRowAgeIsCurrent:
 
         started = time.monotonic()
         result = executor.invoke(_make_input(age_seconds=700))
-        elapsed = time.monotonic() - started
+
+        assert result.status == "complete"
+        assert provider.calls == 1
+        assert time.monotonic() - started >= 0.15
+
+    def test_old_row_throttled_after_its_pause_fails_after_one_call(self):
+        gate = ThrottleGate(0.05, 0.05)
+        gate.on_throttle("model-1", call_started_at=gate.now())
+        provider = FakeProvider(self._always_throttled)
+        executor = BatchExecutor(
+            provider, 1, 1, 0, throttle_gate=gate, max_row_age_seconds=600
+        )
+
+        result = executor.invoke(_make_input(age_seconds=700))
 
         assert result.status == "failed"
-        assert provider.calls == 0
-        assert elapsed < 1
+        assert result.error == "throttled and older than 600 seconds"
+        assert provider.calls == 1
+
+    def test_page_of_old_rows_fails_no_row_without_a_call(self):
+        sent = set()
+        lock = threading.Lock()
+
+        def throttle_first_call(request):
+            with lock:
+                first = not sent
+                sent.add(request.prompt)
+            if first:
+                raise _Throttled("slow down")
+            return LLMResponse({"output_text": "ok"}, 0, 0)
+
+        inputs = [
+            _make_input(row_id=UUID(int=i), prompt=f"p{i}", age_seconds=700)
+            for i in range(100)
+        ]
+        executor = BatchExecutor(
+            FakeProvider(throttle_first_call),
+            20,
+            1,
+            0,
+            throttle_gate=ThrottleGate(0.05, 0.05),
+            max_row_age_seconds=600,
+        )
+
+        outcomes = executor.process_batch(inputs)
+
+        failed = [o for o in outcomes if o.status == "failed"]
+        prompts = {o.row_id: f"p{o.row_id.int}" for o in outcomes}
+        assert len(outcomes) == 100
+        assert len(failed) == 1
+        assert all(prompts[o.row_id] in sent for o in failed)
 
     def test_old_row_still_gets_a_call_when_the_model_is_not_paused(self):
         provider = FakeProvider()

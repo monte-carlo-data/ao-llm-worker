@@ -58,12 +58,6 @@ class ThrottleGate:
         """The longest a single pause can last, in seconds."""
         return self._max_pause
 
-    def is_paused(self, model_id: str) -> bool:
-        """True while ``model_id`` is inside a pause."""
-        with self._lock:
-            state = self._models.get(model_id)
-            return state is not None and self._clock() < state.paused_until
-
     def wait(self, model_id: str, stop_event: threading.Event) -> bool:
         """Block until ``model_id`` isn't paused.
 

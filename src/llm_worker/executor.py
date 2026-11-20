@@ -13,7 +13,6 @@ import logging
 import threading
 from collections.abc import Iterator
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from uuid import UUID
 
@@ -45,11 +44,6 @@ _FUTURES_WAIT_SLICE_SECONDS = 0.5
 
 class _Stopped(Exception):
     """Raised inside a call attempt when the worker is stopping."""
-
-
-class _TooOldToWait(Exception):
-    """Raised before a call attempt when the row is already at the age limit and
-    its model is paused, so waiting out the pause could only make it older."""
 
 
 @dataclass(frozen=True)
@@ -87,8 +81,7 @@ class BatchExecutor:
         self._provider = provider
         # A row whose current age (seconds since insert) plus the longest possible
         # pause would reach this limit fails instead of being deferred again, so
-        # its batch can't stay pending indefinitely. A row already at the limit
-        # also fails, without waiting, if its model is paused.
+        # its batch can't stay pending indefinitely.
         self._max_row_age_seconds = max_row_age_seconds
         self._max_workers = max_workers
         self._retry_max_attempts = retry_max_attempts
@@ -103,20 +96,13 @@ class BatchExecutor:
     def _interruptible_sleep(self, seconds: float) -> None:
         self._stop_event.wait(seconds)
 
-    def _call_through_gate(
-        self, request: ContractRequest, current_age: Callable[[], float]
-    ):
+    def _call_through_gate(self, request: ContractRequest):
         """One call attempt: wait out the model's pause, call the provider, and
         report the outcome to the gate."""
         model_id = request.model_id
         # A stopping worker starts no new calls; the row is left for the next one.
         if self._stop_event.is_set():
             raise _Stopped()
-        # An old row isn't held up by a pause; it fails now rather than waiting.
-        if current_age() >= self._max_row_age_seconds and self._gate.is_paused(
-            model_id
-        ):
-            raise _TooOldToWait()
         if not self._gate.wait(model_id, self._stop_event):
             raise _Stopped()
         started_at = self._gate.now()
@@ -138,15 +124,13 @@ class BatchExecutor:
         self._gate.on_success(model_id, started_at)
         return response
 
-    def _complete_with_retry(
-        self, request: ContractRequest, current_age: Callable[[], float]
-    ):
+    def _complete_with_retry(self, request: ContractRequest):
         retrying = Retrying(
             # Throttles are not retried here: they defer the row instead, so they
             # never use up its retry budget.
             retry=retry_if_exception(
                 lambda exc: (
-                    not isinstance(exc, (_Stopped, _TooOldToWait))
+                    not isinstance(exc, _Stopped)
                     and self._provider.classify_error(exc) == ErrorDisposition.RETRY
                 )
             ),
@@ -168,7 +152,7 @@ class BatchExecutor:
         )
         for attempt in retrying:
             with attempt:
-                return self._call_through_gate(request, current_age)
+                return self._call_through_gate(request)
         raise RuntimeError("Retrying exhausted without result")
 
     @staticmethod
@@ -277,7 +261,7 @@ class BatchExecutor:
             )
 
         try:
-            response = self._complete_with_retry(request, current_age)
+            response = self._complete_with_retry(request)
             logger.info(
                 "row_complete",
                 extra={
@@ -298,10 +282,6 @@ class BatchExecutor:
         except _Stopped:
             # Stopping (during a pause or a retry backoff): defer, don't fail.
             return self._deferred(input_row, reason=_STOPPING)
-        except _TooOldToWait as e:
-            if abort_event and abort_event.is_set():
-                return self._aborted_result(input_row)
-            return self._too_old_result(input_row, type(e).__name__, current_age())
         except Exception as e:
             disposition = self._provider.classify_error(e)
             if disposition == ErrorDisposition.THROTTLED:
