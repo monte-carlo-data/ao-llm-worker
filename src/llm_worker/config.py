@@ -39,10 +39,6 @@ class BedrockConfig:
     # because inference profiles are AWS's own per-call cost-attribution handle;
     # Vertex/Foundry attribute spend by GCP project / Azure resource instead.
     inference_profiles: dict[str, str] = field(default_factory=dict)
-    # Size of the shared boto client's connection pool. Set by main.run from
-    # MAX_WORKERS so every worker thread can hold a connection; botocore's
-    # default is 10.
-    max_pool_connections: int = DEFAULT_MAX_WORKERS
 
 
 @dataclass(frozen=True)

@@ -6,7 +6,7 @@ import signal
 import threading
 import time
 from collections.abc import Iterable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from enum import Enum
 from types import FrameType
 from uuid import UUID
@@ -20,7 +20,7 @@ from tenacity import (
 )
 
 from llm_worker.clickhouse import ClickHouseClient, LLMResult
-from llm_worker.config import BedrockConfig, load_config
+from llm_worker.config import load_config
 from llm_worker.executor import BatchExecutor, Deferred, RowOutcome
 from llm_worker.providers import create_provider, load_provider_config
 from llm_worker.logging_setup import configure_logging
@@ -331,17 +331,12 @@ class LLMWorkerService:
 def run():
     config = load_config()
     provider_config = load_provider_config(os.environ.get("LLM_PROVIDER", "bedrock"))
-    if isinstance(provider_config, BedrockConfig):
-        # The connection pool matches the worker thread count.
-        provider_config = replace(
-            provider_config, max_pool_connections=config.max_workers
-        )
     ch = ClickHouseClient(
         config.clickhouse,
         pending_batch_limit=config.pending_batch_limit,
         batch_page_size=config.batch_page_size,
     )
-    provider = create_provider(provider_config)
+    provider = create_provider(provider_config, max_concurrency=config.max_workers)
     # One stop signal for the whole worker: the service sets it on SIGTERM/SIGINT.
     stop_event = threading.Event()
     executor = BatchExecutor(

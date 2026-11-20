@@ -30,28 +30,30 @@ class _Provider:
     adapter, and which image variant ships its SDK."""
 
     config_loader: Callable[[], ProviderConfig]
-    factory: Callable[[ProviderConfig], LLMProvider]
+    # Builds the adapter from its config and the number of worker threads that
+    # call it concurrently.
+    factory: Callable[[ProviderConfig, int], LLMProvider]
     image_variant: str
 
 
 # Adapter factories import their concrete module lazily, so an image that ships
 # only one provider's SDK never imports the others; a missing adapter/SDK raises
 # ImportError, which create_provider turns into a clear startup error.
-def _build_bedrock(config: ProviderConfig) -> LLMProvider:
+def _build_bedrock(config: ProviderConfig, max_concurrency: int) -> LLMProvider:
     from llm_worker.providers.bedrock import BedrockProvider
 
     assert isinstance(config, BedrockConfig)
-    return BedrockProvider(config)
+    return BedrockProvider(config, max_pool_connections=max_concurrency)
 
 
-def _build_vertex(config: ProviderConfig) -> LLMProvider:
+def _build_vertex(config: ProviderConfig, max_concurrency: int) -> LLMProvider:
     from llm_worker.providers.vertex import VertexProvider
 
     assert isinstance(config, VertexConfig)
     return VertexProvider(config)
 
 
-def _build_foundry(config: ProviderConfig) -> LLMProvider:
+def _build_foundry(config: ProviderConfig, max_concurrency: int) -> LLMProvider:
     from llm_worker.providers.foundry import FoundryProvider
 
     assert isinstance(config, FoundryConfig)
@@ -82,8 +84,11 @@ def load_provider_config(provider: str) -> ProviderConfig:
     return _get(provider).config_loader()
 
 
-def create_provider(provider_config: ProviderConfig) -> LLMProvider:
-    """Build the provider adapter for ``provider_config``.
+def create_provider(
+    provider_config: ProviderConfig, *, max_concurrency: int
+) -> LLMProvider:
+    """Build the provider adapter for ``provider_config``, sized for
+    ``max_concurrency`` threads calling it at once.
 
     The adapter module is imported lazily inside its factory, so an image that
     ships only one provider's SDK never imports the others. A missing adapter/SDK
@@ -92,7 +97,7 @@ def create_provider(provider_config: ProviderConfig) -> LLMProvider:
     """
     entry = _get(provider_config.provider)
     try:
-        return entry.factory(provider_config)
+        return entry.factory(provider_config, max_concurrency)
     except ImportError as e:
         raise RuntimeError(
             f"LLM_PROVIDER={provider_config.provider} selected but its adapter/SDK "

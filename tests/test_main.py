@@ -634,7 +634,7 @@ def _service_config(mocker, max_workers=20):
 
 
 class TestRunStartup:
-    def test_run_sizes_the_bedrock_pool_from_max_workers(self, mocker):
+    def test_run_sizes_the_provider_from_max_workers(self, mocker):
         mocker.patch(
             "llm_worker.main.load_config",
             return_value=_service_config(mocker, max_workers=37),
@@ -650,7 +650,7 @@ class TestRunStartup:
 
         run()
 
-        assert create_provider.call_args.args[0].max_pool_connections == 37
+        assert create_provider.call_args.kwargs["max_concurrency"] == 37
 
     def test_run_passes_the_provider_capabilities(self, mocker):
         mocker.patch(
